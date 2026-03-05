@@ -104,14 +104,21 @@ export function createTradingTools(resolver: AccountResolver) {
     // ==================== Contract Search (IBKR: reqMatchingSymbols) ====================
 
     searchContracts: tool({
-      description: `Search for tradeable symbols across accounts.
+      description: `Search broker accounts for tradeable contracts matching a pattern.
 
-Returns matching contracts with source attribution so you know which account can trade each symbol.
-Use this BEFORE placing orders to discover what's available and where.
+This is a BROKER-LEVEL search — it queries your connected trading accounts to find
+what contracts are available to trade and on which account. Returns contract details
+with source attribution.
 
-Examples:
-- searchContracts({ pattern: "AAPL" }) → finds AAPL on equity accounts
-- searchContracts({ pattern: "BTC" }) → finds BTC markets on crypto accounts`,
+When to use:
+- You need to discover which account can trade a symbol (e.g. "Is BTC on ccxt or alpaca?")
+- You want to find the exact broker contract format (e.g. "BTC" → "BTC/USDT:USDT" on ccxt)
+- You're unsure if a symbol is tradeable on a specific account
+
+When NOT to use:
+- You already have the symbol and just need a price → use getQuote directly
+- You want to research companies or market data → use equitySearch / cryptoSearch instead
+- You're about to place an order with a known symbol → placeOrder handles routing itself`,
       inputSchema: z.object({
         pattern: z.string().describe('Symbol or keyword to search (e.g. "AAPL", "BTC", "TSLA")'),
         source: z.string().optional().describe(sourceDesc(false)),
@@ -144,12 +151,14 @@ Examples:
     // ==================== Contract Details (IBKR: reqContractDetails) ====================
 
     getContractDetails: tool({
-      description: `Get full contract specification for a specific instrument.
+      description: `Get full contract specification from a specific broker account.
 
-Returns detailed information including trading hours, supported order types,
-valid exchanges, price increments, and more.
+Returns detailed broker-level information: supported order types, valid exchanges,
+price increments (minTick), trading hours, and contract classification.
 
-Use this after searchContracts to get detailed specs for a specific contract.`,
+Use this when you need broker-specific contract specs (e.g. what order types are
+supported, minimum tick size). NOT needed for general company info — use
+equityGetProfile for that.`,
       inputSchema: z.object({
         source: z.string().describe(sourceDesc(true)),
         symbol: z.string().optional().describe('Symbol to look up (e.g. "AAPL", "BTC")'),
