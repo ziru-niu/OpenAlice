@@ -1,3 +1,13 @@
+// ==================== Channels ====================
+
+export interface WebChannel {
+  id: string
+  label: string
+  systemPrompt?: string
+  provider?: 'claude-code' | 'vercel-ai-sdk'
+  disabledTools?: string[]
+}
+
 // ==================== Chat ====================
 
 export interface ChatMessage {

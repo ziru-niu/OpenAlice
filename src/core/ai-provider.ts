@@ -31,6 +31,17 @@ export interface AskOptions {
    * Vercel AI SDK: not used (compaction via `compactIfNeeded` controls context size).
    */
   maxHistoryEntries?: number
+  /**
+   * Tool names to disable for this call, in addition to the global disabled list.
+   * Claude Code: merged into `disallowedTools` CLI option.
+   * Vercel AI SDK: filtered out from the tool map before the agent is created.
+   */
+  disabledTools?: string[]
+  /**
+   * AI provider to use for this call, overriding the global ai-provider.json config.
+   * Falls back to global config if not specified.
+   */
+  provider?: 'claude-code' | 'vercel-ai-sdk'
 }
 
 export interface ProviderResult {
@@ -64,6 +75,14 @@ export class ProviderRouter implements AIProvider {
   }
 
   async askWithSession(prompt: string, session: SessionStore, opts?: AskOptions): Promise<ProviderResult> {
+    // Per-request provider override takes precedence over global config
+    if (opts?.provider === 'claude-code' && this.claudeCode) {
+      return this.claudeCode.askWithSession(prompt, session, opts)
+    }
+    if (opts?.provider === 'vercel-ai-sdk') {
+      return this.vercel.askWithSession(prompt, session, opts)
+    }
+    // Fall back to global config
     const config = await readAIProviderConfig()
     if (config.backend === 'claude-code' && this.claudeCode) {
       return this.claudeCode.askWithSession(prompt, session, opts)

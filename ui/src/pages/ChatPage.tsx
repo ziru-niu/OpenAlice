@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { api, type ChatHistoryItem, type ToolCall } from '../api'
+import { api, type ToolCall } from '../api'
+import type { ChannelListItem } from '../api/channels'
 import { useSSE } from '../hooks/useSSE'
 import { ChatMessage, ToolCallGroup, ThinkingIndicator } from '../components/ChatMessage'
 import { ChatInput } from '../components/ChatInput'
@@ -14,6 +15,12 @@ interface ChatPageProps {
 }
 
 export function ChatPage({ onSSEStatus }: ChatPageProps) {
+  const [channels, setChannels] = useState<ChannelListItem[]>([{ id: 'default', label: 'Alice' }])
+  const [activeChannel, setActiveChannel] = useState('default')
+  const [showNewChannel, setShowNewChannel] = useState(false)
+  const [newChannelId, setNewChannelId] = useState('')
+  const [newChannelLabel, setNewChannelLabel] = useState('')
+  const [newChannelError, setNewChannelError] = useState('')
   const [messages, setMessages] = useState<DisplayItem[]>([])
   const [isWaiting, setIsWaiting] = useState(false)
   const [showScrollBtn, setShowScrollBtn] = useState(false)
@@ -21,6 +28,8 @@ export function ChatPage({ onSSEStatus }: ChatPageProps) {
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const userScrolledUp = useRef(false)
   const containerRef = useRef<HTMLDivElement>(null)
+  const activeChannelRef = useRef(activeChannel)
+  activeChannelRef.current = activeChannel
 
   // Auto-scroll to bottom
   const scrollToBottom = useCallback(() => {
@@ -45,10 +54,16 @@ export function ChatPage({ onSSEStatus }: ChatPageProps) {
     return () => el.removeEventListener('scroll', onScroll)
   }, [])
 
-  // Load chat history
+  // Load channels list on mount
   useEffect(() => {
-    api.chat.history(100).then(({ messages }) => {
-      setMessages(messages.map((m): DisplayItem => {
+    api.channels.list().then(({ channels: ch }) => setChannels(ch)).catch(() => {})
+  }, [])
+
+  // Load chat history when active channel changes
+  useEffect(() => {
+    const channel = activeChannel === 'default' ? undefined : activeChannel
+    api.chat.history(100, channel).then(({ messages: msgs }) => {
+      setMessages(msgs.map((m): DisplayItem => {
         if (m.kind === 'text' && m.metadata?.kind === 'notification') {
           return { ...m, role: 'notification', _id: nextId.current++ }
         }
@@ -57,11 +72,12 @@ export function ChatPage({ onSSEStatus }: ChatPageProps) {
     }).catch((err) => {
       console.warn('Failed to load history:', err)
     })
-  }, [])
+  }, [activeChannel])
 
-  // Connect SSE for push notifications + report connection status
+  // SSE for the active channel
+  const sseChannel = activeChannel === 'default' ? undefined : activeChannel
   useSSE({
-    url: '/api/chat/events',
+    url: sseChannel ? `/api/chat/events?channel=${encodeURIComponent(sseChannel)}` : '/api/chat/events',
     onMessage: (data) => {
       if (data.type === 'message' && data.text) {
         const role = data.kind === 'message' ? 'assistant' : 'notification'
@@ -71,7 +87,7 @@ export function ChatPage({ onSSEStatus }: ChatPageProps) {
         ])
       }
     },
-    onStatus: onSSEStatus,
+    onStatus: activeChannel === 'default' ? onSSEStatus : undefined,
   })
 
   // Send message
@@ -80,7 +96,8 @@ export function ChatPage({ onSSEStatus }: ChatPageProps) {
     setIsWaiting(true)
 
     try {
-      const data = await api.chat.send(text)
+      const channel = activeChannelRef.current === 'default' ? undefined : activeChannelRef.current
+      const data = await api.chat.send(text, channel)
 
       if (data.text) {
         const media = data.media?.length ? data.media : undefined
@@ -103,8 +120,109 @@ export function ChatPage({ onSSEStatus }: ChatPageProps) {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [])
 
+  const handleCreateChannel = useCallback(async () => {
+    setNewChannelError('')
+    if (!newChannelId.trim() || !newChannelLabel.trim()) {
+      setNewChannelError('ID and label are required')
+      return
+    }
+    try {
+      const { channel } = await api.channels.create({ id: newChannelId.trim(), label: newChannelLabel.trim() })
+      setChannels((prev) => [...prev, channel])
+      setActiveChannel(channel.id)
+      setShowNewChannel(false)
+      setNewChannelId('')
+      setNewChannelLabel('')
+    } catch (err) {
+      setNewChannelError(err instanceof Error ? err.message : 'Failed to create channel')
+    }
+  }, [newChannelId, newChannelLabel])
+
+  const handleDeleteChannel = useCallback(async (id: string) => {
+    try {
+      await api.channels.remove(id)
+      setChannels((prev) => prev.filter((ch) => ch.id !== id))
+      if (activeChannel === id) setActiveChannel('default')
+    } catch (err) {
+      console.error('Failed to delete channel:', err)
+    }
+  }, [activeChannel])
+
+  const activeChannelConfig = channels.find((ch) => ch.id === activeChannel)
+
   return (
     <div className="flex flex-col flex-1 min-h-0 max-w-[800px] mx-auto w-full">
+      {/* Channel tabs */}
+      <div className="flex items-center gap-1 px-4 pt-3 pb-1 border-b border-border overflow-x-auto">
+        {channels.map((ch) => (
+          <div key={ch.id} className="flex items-center group">
+            <button
+              onClick={() => setActiveChannel(ch.id)}
+              className={`px-3 py-1 rounded-md text-sm font-medium whitespace-nowrap transition-colors ${
+                activeChannel === ch.id
+                  ? 'bg-accent/10 text-accent'
+                  : 'text-text-muted hover:text-text hover:bg-bg-secondary'
+              }`}
+            >
+              {ch.label}
+            </button>
+            {ch.id !== 'default' && (
+              <button
+                onClick={() => handleDeleteChannel(ch.id)}
+                className="ml-0.5 w-4 h-4 rounded flex items-center justify-center text-text-muted opacity-0 group-hover:opacity-100 hover:text-text hover:bg-bg-secondary transition-all"
+                aria-label={`Delete ${ch.label}`}
+              >
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                  <path d="M18 6L6 18M6 6l12 12" />
+                </svg>
+              </button>
+            )}
+          </div>
+        ))}
+        <button
+          onClick={() => setShowNewChannel((v) => !v)}
+          className="ml-1 w-6 h-6 rounded flex items-center justify-center text-text-muted hover:text-text hover:bg-bg-secondary transition-colors flex-shrink-0"
+          aria-label="New channel"
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+            <path d="M12 5v14M5 12h14" />
+          </svg>
+        </button>
+      </div>
+
+      {/* New channel form */}
+      {showNewChannel && (
+        <div className="px-4 py-3 border-b border-border bg-bg-secondary/50 flex items-center gap-2 flex-wrap">
+          <input
+            type="text"
+            placeholder="id (e.g. research)"
+            value={newChannelId}
+            onChange={(e) => setNewChannelId(e.target.value.toLowerCase().replace(/[^a-z0-9-_]/g, ''))}
+            className="text-sm px-2 py-1 rounded border border-border bg-bg text-text placeholder:text-text-muted focus:outline-none focus:border-accent w-36"
+          />
+          <input
+            type="text"
+            placeholder="label"
+            value={newChannelLabel}
+            onChange={(e) => setNewChannelLabel(e.target.value)}
+            className="text-sm px-2 py-1 rounded border border-border bg-bg text-text placeholder:text-text-muted focus:outline-none focus:border-accent w-32"
+          />
+          <button
+            onClick={handleCreateChannel}
+            className="text-sm px-3 py-1 rounded bg-accent text-white hover:bg-accent/80 transition-colors"
+          >
+            Create
+          </button>
+          <button
+            onClick={() => { setShowNewChannel(false); setNewChannelError('') }}
+            className="text-sm px-2 py-1 rounded text-text-muted hover:text-text"
+          >
+            Cancel
+          </button>
+          {newChannelError && <span className="text-sm text-red-400">{newChannelError}</span>}
+        </div>
+      )}
+
       {/* Messages */}
       <div ref={containerRef} className="flex-1 overflow-y-auto px-5 py-6 relative">
         {messages.length === 0 && !isWaiting && (
@@ -115,8 +233,17 @@ export function ChatPage({ onSSEStatus }: ChatPageProps) {
               </svg>
             </div>
             <div className="text-center">
-              <h2 className="text-lg font-semibold text-text mb-1">Hi, I'm Alice</h2>
-              <p className="text-sm text-text-muted">Send a message to start chatting</p>
+              {activeChannel === 'default' ? (
+                <>
+                  <h2 className="text-lg font-semibold text-text mb-1">Hi, I'm Alice</h2>
+                  <p className="text-sm text-text-muted">Send a message to start chatting</p>
+                </>
+              ) : (
+                <>
+                  <h2 className="text-lg font-semibold text-text mb-1">{activeChannelConfig?.label ?? activeChannel}</h2>
+                  <p className="text-sm text-text-muted">Send a message to start chatting</p>
+                </>
+              )}
             </div>
           </div>
         )}
@@ -125,7 +252,6 @@ export function ChatPage({ onSSEStatus }: ChatPageProps) {
             const prev = i > 0 ? messages[i - 1] : undefined
 
             if (msg.kind === 'tool_calls') {
-              // Tool calls get compact spacing, grouped under the preceding assistant block
               const prevIsAssistantish = prev != null && (
                 prev.kind === 'tool_calls' ||
                 (prev.kind === 'text' && prev.role === 'assistant')

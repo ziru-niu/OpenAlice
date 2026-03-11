@@ -32,13 +32,21 @@ export class VercelAIProvider implements AIProvider {
   ) {}
 
   /** Lazily create or return the cached agent, re-creating when config, tools, or system prompt change. */
-  private async resolveAgent(systemPrompt?: string): Promise<Agent> {
+  private async resolveAgent(systemPrompt?: string, disabledTools?: string[]): Promise<Agent> {
     const { model, key } = await createModelFromConfig()
-    const tools = await this.getTools()
-    const toolCount = Object.keys(tools).length
+    const allTools = await this.getTools()
+
+    // Per-channel tool override: skip cache and create a fresh agent with filtered tools
+    if (disabledTools?.length) {
+      const disabledSet = new Set(disabledTools)
+      const tools = Object.fromEntries(Object.entries(allTools).filter(([name]) => !disabledSet.has(name)))
+      return createAgent(model, tools, systemPrompt ?? this.instructions, this.maxSteps)
+    }
+
+    const toolCount = Object.keys(allTools).length
     const effectivePrompt = systemPrompt ?? null
     if (key !== this.cachedKey || toolCount !== this.cachedToolCount || effectivePrompt !== this.cachedSystemPrompt) {
-      this.cachedAgent = createAgent(model, tools, systemPrompt ?? this.instructions, this.maxSteps)
+      this.cachedAgent = createAgent(model, allTools, systemPrompt ?? this.instructions, this.maxSteps)
       this.cachedKey = key
       this.cachedToolCount = toolCount
       this.cachedSystemPrompt = effectivePrompt
@@ -63,7 +71,7 @@ export class VercelAIProvider implements AIProvider {
 
   async askWithSession(prompt: string, session: SessionStore, opts?: AskOptions): Promise<ProviderResult> {
     // historyPreamble and maxHistoryEntries are not used: Vercel passes native ModelMessage[] with no text wrapping needed.
-    const agent = await this.resolveAgent(opts?.systemPrompt)
+    const agent = await this.resolveAgent(opts?.systemPrompt, opts?.disabledTools)
 
     await session.appendUser(prompt, 'human')
 

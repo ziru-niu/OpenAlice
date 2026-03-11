@@ -172,6 +172,22 @@ export const toolsSchema = z.object({
   disabled: z.array(z.string()).default([]),
 })
 
+export const webSubchannelSchema = z.object({
+  /** URL-safe identifier. Used as session path segment: data/sessions/web/{id}.jsonl */
+  id: z.string().regex(/^[a-z0-9-_]+$/, 'id must be lowercase alphanumeric with hyphens/underscores'),
+  label: z.string().min(1),
+  /** System prompt override for this channel. */
+  systemPrompt: z.string().optional(),
+  /** AI provider override ('claude-code' | 'vercel-ai-sdk'). Falls back to global config if omitted. */
+  provider: z.enum(['claude-code', 'vercel-ai-sdk']).optional(),
+  /** Tool names to disable in addition to the global disabled list. */
+  disabledTools: z.array(z.string()).optional(),
+})
+
+export const webSubchannelsSchema = z.array(webSubchannelSchema)
+
+export type WebChannel = z.infer<typeof webSubchannelSchema>
+
 // ==================== Platform + Account Config ====================
 
 const guardConfigSchema = z.object({
@@ -525,4 +541,17 @@ export async function writeConfigSection(section: ConfigSection, data: unknown):
   await mkdir(CONFIG_DIR, { recursive: true })
   await writeFile(resolve(CONFIG_DIR, sectionFiles[section]), JSON.stringify(validated, null, 2) + '\n')
   return validated
+}
+
+/** Read web sub-channel definitions from disk. Returns empty array if file missing. */
+export async function readWebSubchannels(): Promise<WebChannel[]> {
+  const raw = await loadJsonFile('web-subchannels.json')
+  return webSubchannelsSchema.parse(raw ?? [])
+}
+
+/** Write web sub-channel definitions to disk. */
+export async function writeWebSubchannels(channels: WebChannel[]): Promise<void> {
+  const validated = webSubchannelsSchema.parse(channels)
+  await mkdir(CONFIG_DIR, { recursive: true })
+  await writeFile(resolve(CONFIG_DIR, 'web-subchannels.json'), JSON.stringify(validated, null, 2) + '\n')
 }

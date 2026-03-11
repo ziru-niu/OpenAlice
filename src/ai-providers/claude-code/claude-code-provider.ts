@@ -41,11 +41,16 @@ export class ClaudeCodeProvider implements AIProvider {
 
   async askWithSession(prompt: string, session: SessionStore, opts?: AskOptions): Promise<ProviderResult> {
     const config = await this.resolveConfig()
+    // Merge per-channel disabledTools with global disallowedTools
+    const claudeCode = opts?.disabledTools?.length
+      ? { ...config, disallowedTools: [...(config.disallowedTools ?? []), ...opts.disabledTools] }
+      : config
     return askClaudeCodeWithSession(prompt, session, {
-      claudeCode: config,
+      claudeCode,
       compaction: this.compaction,
-      ...opts,
+      historyPreamble: opts?.historyPreamble,
       systemPrompt: opts?.systemPrompt ?? this.systemPrompt,
+      maxHistoryEntries: opts?.maxHistoryEntries,
     })
   }
 }
