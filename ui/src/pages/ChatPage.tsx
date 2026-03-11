@@ -4,6 +4,7 @@ import type { ChannelListItem } from '../api/channels'
 import { useSSE } from '../hooks/useSSE'
 import { ChatMessage, ToolCallGroup, ThinkingIndicator } from '../components/ChatMessage'
 import { ChatInput } from '../components/ChatInput'
+import { ChannelConfigModal } from '../components/ChannelConfigModal'
 
 /** Unified display item for the message list. */
 type DisplayItem =
@@ -17,19 +18,43 @@ interface ChatPageProps {
 export function ChatPage({ onSSEStatus }: ChatPageProps) {
   const [channels, setChannels] = useState<ChannelListItem[]>([{ id: 'default', label: 'Alice' }])
   const [activeChannel, setActiveChannel] = useState('default')
-  const [showNewChannel, setShowNewChannel] = useState(false)
-  const [newChannelId, setNewChannelId] = useState('')
-  const [newChannelLabel, setNewChannelLabel] = useState('')
-  const [newChannelError, setNewChannelError] = useState('')
   const [messages, setMessages] = useState<DisplayItem[]>([])
   const [isWaiting, setIsWaiting] = useState(false)
   const [showScrollBtn, setShowScrollBtn] = useState(false)
+
+  // Popover state
+  const [popoverOpen, setPopoverOpen] = useState(false)
+  const [showNewForm, setShowNewForm] = useState(false)
+  const [newChannelId, setNewChannelId] = useState('')
+  const [newChannelLabel, setNewChannelLabel] = useState('')
+  const [newChannelError, setNewChannelError] = useState('')
+  const [editingChannel, setEditingChannel] = useState<ChannelListItem | null>(null)
+  const popoverRef = useRef<HTMLDivElement>(null)
+
   const nextId = useRef(0)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const userScrolledUp = useRef(false)
   const containerRef = useRef<HTMLDivElement>(null)
   const activeChannelRef = useRef(activeChannel)
   activeChannelRef.current = activeChannel
+
+  const isOnSubChannel = activeChannel !== 'default'
+  const subChannels = channels.filter((ch) => ch.id !== 'default')
+  const activeChannelConfig = channels.find((ch) => ch.id === activeChannel)
+
+  // Close popover on outside click
+  useEffect(() => {
+    if (!popoverOpen) return
+    const handler = (e: MouseEvent) => {
+      if (popoverRef.current && !popoverRef.current.contains(e.target as Node)) {
+        setPopoverOpen(false)
+        setShowNewForm(false)
+        setNewChannelError('')
+      }
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [popoverOpen])
 
   // Auto-scroll to bottom
   const scrollToBottom = useCallback(() => {
@@ -120,6 +145,13 @@ export function ChatPage({ onSSEStatus }: ChatPageProps) {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [])
 
+  const switchToChannel = useCallback((id: string) => {
+    setActiveChannel(id)
+    setPopoverOpen(false)
+    setShowNewForm(false)
+    setNewChannelError('')
+  }, [])
+
   const handleCreateChannel = useCallback(async () => {
     setNewChannelError('')
     if (!newChannelId.trim() || !newChannelLabel.trim()) {
@@ -129,102 +161,164 @@ export function ChatPage({ onSSEStatus }: ChatPageProps) {
     try {
       const { channel } = await api.channels.create({ id: newChannelId.trim(), label: newChannelLabel.trim() })
       setChannels((prev) => [...prev, channel])
-      setActiveChannel(channel.id)
-      setShowNewChannel(false)
+      switchToChannel(channel.id)
       setNewChannelId('')
       setNewChannelLabel('')
     } catch (err) {
       setNewChannelError(err instanceof Error ? err.message : 'Failed to create channel')
     }
-  }, [newChannelId, newChannelLabel])
+  }, [newChannelId, newChannelLabel, switchToChannel])
 
-  const handleDeleteChannel = useCallback(async (id: string) => {
+  const handleDeleteChannel = useCallback(async (id: string, e: React.MouseEvent) => {
+    e.stopPropagation()
     try {
       await api.channels.remove(id)
       setChannels((prev) => prev.filter((ch) => ch.id !== id))
-      if (activeChannel === id) setActiveChannel('default')
+      if (activeChannel === id) switchToChannel('default')
     } catch (err) {
       console.error('Failed to delete channel:', err)
     }
-  }, [activeChannel])
-
-  const activeChannelConfig = channels.find((ch) => ch.id === activeChannel)
+  }, [activeChannel, switchToChannel])
 
   return (
     <div className="flex flex-col flex-1 min-h-0 max-w-[800px] mx-auto w-full">
-      {/* Channel tabs */}
-      <div className="flex items-center gap-1 px-4 pt-3 pb-1 border-b border-border overflow-x-auto">
-        {channels.map((ch) => (
-          <div key={ch.id} className="flex items-center group">
+      {/* Sub-channel context bar */}
+      {isOnSubChannel && (
+        <div className="flex items-center gap-3 px-4 py-2 border-b border-border bg-bg-secondary/30">
+          <button
+            onClick={() => switchToChannel('default')}
+            className="flex items-center gap-1 text-sm text-text-muted hover:text-text transition-colors"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M19 12H5M12 19l-7-7 7-7" />
+            </svg>
+            Alice
+          </button>
+          <span className="text-sm text-text-muted/50">|</span>
+          <span className="text-sm font-medium text-text">
+            <span className="text-text-muted mr-0.5">#</span>
+            {activeChannelConfig?.label ?? activeChannel}
+          </span>
+          {activeChannelConfig && activeChannelConfig.id !== 'default' && (
             <button
-              onClick={() => setActiveChannel(ch.id)}
-              className={`px-3 py-1 rounded-md text-sm font-medium whitespace-nowrap transition-colors ${
-                activeChannel === ch.id
-                  ? 'bg-accent/10 text-accent'
-                  : 'text-text-muted hover:text-text hover:bg-bg-secondary'
-              }`}
+              onClick={() => setEditingChannel(activeChannelConfig)}
+              className="ml-auto w-6 h-6 rounded flex items-center justify-center text-text-muted/50 hover:text-text-muted hover:bg-bg-secondary transition-colors"
+              title="Channel settings"
             >
-              {ch.label}
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
+                <circle cx="12" cy="12" r="3" />
+              </svg>
             </button>
-            {ch.id !== 'default' && (
-              <button
-                onClick={() => handleDeleteChannel(ch.id)}
-                className="ml-0.5 w-4 h-4 rounded flex items-center justify-center text-text-muted opacity-0 group-hover:opacity-100 hover:text-text hover:bg-bg-secondary transition-all"
-                aria-label={`Delete ${ch.label}`}
-              >
-                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                  <path d="M18 6L6 18M6 6l12 12" />
-                </svg>
-              </button>
-            )}
-          </div>
-        ))}
-        <button
-          onClick={() => setShowNewChannel((v) => !v)}
-          className="ml-1 w-6 h-6 rounded flex items-center justify-center text-text-muted hover:text-text hover:bg-bg-secondary transition-colors flex-shrink-0"
-          aria-label="New channel"
-        >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-            <path d="M12 5v14M5 12h14" />
-          </svg>
-        </button>
-      </div>
-
-      {/* New channel form */}
-      {showNewChannel && (
-        <div className="px-4 py-3 border-b border-border bg-bg-secondary/50 flex items-center gap-2 flex-wrap">
-          <input
-            type="text"
-            placeholder="id (e.g. research)"
-            value={newChannelId}
-            onChange={(e) => setNewChannelId(e.target.value.toLowerCase().replace(/[^a-z0-9-_]/g, ''))}
-            className="text-sm px-2 py-1 rounded border border-border bg-bg text-text placeholder:text-text-muted focus:outline-none focus:border-accent w-36"
-          />
-          <input
-            type="text"
-            placeholder="label"
-            value={newChannelLabel}
-            onChange={(e) => setNewChannelLabel(e.target.value)}
-            className="text-sm px-2 py-1 rounded border border-border bg-bg text-text placeholder:text-text-muted focus:outline-none focus:border-accent w-32"
-          />
-          <button
-            onClick={handleCreateChannel}
-            className="text-sm px-3 py-1 rounded bg-accent text-white hover:bg-accent/80 transition-colors"
-          >
-            Create
-          </button>
-          <button
-            onClick={() => { setShowNewChannel(false); setNewChannelError('') }}
-            className="text-sm px-2 py-1 rounded text-text-muted hover:text-text"
-          >
-            Cancel
-          </button>
-          {newChannelError && <span className="text-sm text-red-400">{newChannelError}</span>}
+          )}
         </div>
       )}
 
-      {/* Messages */}
-      <div ref={containerRef} className="flex-1 overflow-y-auto px-5 py-6 relative">
+      {/* Messages area wrapper — relative so the # button stays fixed */}
+      <div className="flex-1 min-h-0 relative">
+        {/* # icon button — fixed in top-right corner, always visible on main channel */}
+        {!isOnSubChannel && (
+          <div className="absolute top-3 right-5 z-20" ref={popoverRef}>
+            <button
+              onClick={() => setPopoverOpen((v) => !v)}
+              className="w-7 h-7 rounded-md flex items-center justify-center text-text-muted/40 hover:text-text-muted hover:bg-bg-secondary/80 transition-all"
+              aria-label="Channels"
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M4 9h16M4 15h16M10 3l-2 18M16 3l-2 18" />
+              </svg>
+            </button>
+
+            {/* Popover dropdown */}
+            {popoverOpen && (
+              <div className="absolute top-9 right-0 w-56 rounded-lg border border-border bg-bg shadow-xl py-1 animate-in fade-in slide-in-from-top-1 duration-150">
+                {subChannels.map((ch) => (
+                  <button
+                    key={ch.id}
+                    onClick={() => switchToChannel(ch.id)}
+                    className="w-full flex items-center justify-between px-3 py-2 text-sm text-text hover:bg-bg-secondary/60 transition-colors group"
+                  >
+                    <span>
+                      <span className="text-text-muted mr-1">#</span>
+                      {ch.label}
+                    </span>
+                    <span className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-all">
+                      <span
+                        onClick={(e) => { e.stopPropagation(); setEditingChannel(ch); setPopoverOpen(false) }}
+                        className="w-5 h-5 rounded flex items-center justify-center text-text-muted hover:text-text hover:bg-bg-secondary cursor-pointer"
+                        title="Settings"
+                      >
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                          <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
+                          <circle cx="12" cy="12" r="3" />
+                        </svg>
+                      </span>
+                      <span
+                        onClick={(e) => handleDeleteChannel(ch.id, e)}
+                        className="w-5 h-5 rounded flex items-center justify-center text-text-muted hover:text-red-400 hover:bg-red-400/10 cursor-pointer"
+                        title="Delete"
+                      >
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                          <path d="M18 6L6 18M6 6l12 12" />
+                        </svg>
+                      </span>
+                    </span>
+                  </button>
+                ))}
+
+                <div className="border-t border-border my-1" />
+
+                {!showNewForm ? (
+                  <button
+                    onClick={() => setShowNewForm(true)}
+                    className="w-full flex items-center gap-2 px-3 py-2 text-sm text-text-muted hover:text-text hover:bg-bg-secondary/60 transition-colors"
+                  >
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                      <path d="M12 5v14M5 12h14" />
+                    </svg>
+                    New channel
+                  </button>
+                ) : (
+                  <div className="px-3 py-2 space-y-2">
+                    <input
+                      type="text"
+                      placeholder="id (e.g. research)"
+                      value={newChannelId}
+                      onChange={(e) => setNewChannelId(e.target.value.toLowerCase().replace(/[^a-z0-9-_]/g, ''))}
+                      className="w-full text-xs px-2 py-1.5 rounded border border-border bg-bg-secondary text-text placeholder:text-text-muted focus:outline-none focus:border-accent"
+                      autoFocus
+                    />
+                    <input
+                      type="text"
+                      placeholder="label"
+                      value={newChannelLabel}
+                      onChange={(e) => setNewChannelLabel(e.target.value)}
+                      className="w-full text-xs px-2 py-1.5 rounded border border-border bg-bg-secondary text-text placeholder:text-text-muted focus:outline-none focus:border-accent"
+                    />
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={handleCreateChannel}
+                        className="text-xs px-2.5 py-1 rounded bg-accent text-white hover:bg-accent/80 transition-colors"
+                      >
+                        Create
+                      </button>
+                      <button
+                        onClick={() => { setShowNewForm(false); setNewChannelError(''); setNewChannelId(''); setNewChannelLabel('') }}
+                        className="text-xs px-2 py-1 rounded text-text-muted hover:text-text"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                    {newChannelError && <p className="text-xs text-red-400">{newChannelError}</p>}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Scrollable messages */}
+        <div ref={containerRef} className="h-full overflow-y-auto px-5 py-6">
         {messages.length === 0 && !isWaiting && (
           <div className="flex-1 flex flex-col items-center justify-center h-full gap-4 select-none">
             <div className="w-14 h-14 rounded-2xl bg-bg-secondary border border-border flex items-center justify-center text-accent">
@@ -287,6 +381,7 @@ export function ChatPage({ onSSEStatus }: ChatPageProps) {
           )}
         </div>
         <div ref={messagesEndRef} />
+        </div>
       </div>
 
       {/* Scroll to bottom button */}
@@ -306,6 +401,18 @@ export function ChatPage({ onSSEStatus }: ChatPageProps) {
 
       {/* Input */}
       <ChatInput disabled={isWaiting} onSend={handleSend} />
+
+      {/* Channel config modal */}
+      {editingChannel && (
+        <ChannelConfigModal
+          channel={editingChannel}
+          onClose={() => setEditingChannel(null)}
+          onSaved={(updated) => {
+            setChannels((prev) => prev.map((ch) => ch.id === updated.id ? updated : ch))
+            setEditingChannel(null)
+          }}
+        />
+      )}
     </div>
   )
 }
