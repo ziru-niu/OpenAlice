@@ -2,13 +2,13 @@ import type { AccountManager } from '../extension/trading/index.js'
 import type { ITradingGit } from '../extension/trading/git/interfaces.js'
 import type { CronEngine } from '../task/cron/engine.js'
 import type { Heartbeat } from '../task/heartbeat/index.js'
-import type { Config } from './config.js'
+import type { Config, WebChannel } from './config.js'
 import type { ConnectorCenter } from './connector-center.js'
-import type { Engine } from './engine.js'
+import type { AgentCenter } from './agent-center.js'
 import type { EventLog } from './event-log.js'
 import type { ToolCenter } from './tool-center.js'
 
-export type { Config }
+export type { Config, WebChannel }
 
 export interface Plugin {
   name: string
@@ -25,7 +25,7 @@ export interface ReconnectResult {
 export interface EngineContext {
   config: Config
   connectorCenter: ConnectorCenter
-  engine: Engine
+  agentCenter: AgentCenter
   eventLog: EventLog
   heartbeat: Heartbeat
   cronEngine: CronEngine

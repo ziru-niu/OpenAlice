@@ -1,7 +1,7 @@
 /**
  * News Collector — OpenBB piggyback
  *
- * Wraps the existing newsGetWorld / newsGetCompany tool execute functions
+ * Wraps the newsGetCompany tool execute function
  * to capture API results and ingest them into the persistent store.
  * Results are returned to the agent unchanged; ingestion is fire-and-forget.
  */
@@ -18,12 +18,6 @@ export function wrapNewsToolsForPiggyback<T extends Record<string, Tool>>(
   store: NewsCollectorStore,
 ): T {
   const wrapped = { ...originalTools }
-
-  if (originalTools.newsGetWorld) {
-    ;(wrapped as Record<string, Tool>).newsGetWorld = wrapTool(originalTools.newsGetWorld, (result) => {
-      ingestOpenBBResults(store, result, 'openbb-world').catch(() => {})
-    })
-  }
 
   if (originalTools.newsGetCompany) {
     ;(wrapped as Record<string, Tool>).newsGetCompany = wrapTool(originalTools.newsGetCompany, (result, args) => {

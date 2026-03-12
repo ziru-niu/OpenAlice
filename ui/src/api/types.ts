@@ -1,3 +1,28 @@
+// ==================== Channels ====================
+
+export interface VercelAiSdkOverride {
+  provider: string
+  model: string
+  baseUrl?: string
+  apiKey?: string
+}
+
+export interface AgentSdkOverride {
+  model?: string
+  baseUrl?: string
+  apiKey?: string
+}
+
+export interface WebChannel {
+  id: string
+  label: string
+  systemPrompt?: string
+  provider?: 'claude-code' | 'vercel-ai-sdk' | 'agent-sdk'
+  vercelAiSdk?: VercelAiSdkOverride
+  agentSdk?: AgentSdkOverride
+  disabledTools?: string[]
+}
+
 // ==================== Chat ====================
 
 export interface ChatMessage {
@@ -14,6 +39,14 @@ export interface ChatResponse {
 export interface ToolCall {
   name: string
   input: string
+  result?: string
+}
+
+export interface StreamingToolCall {
+  id: string
+  name: string
+  input: unknown
+  status: 'running' | 'done'
   result?: string
 }
 

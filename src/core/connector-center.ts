@@ -12,6 +12,7 @@
 
 import type { MediaAttachment } from './types.js'
 import type { EventLog } from './event-log.js'
+import type { StreamableResult } from './ai-provider.js'
 
 // ==================== Send Types ====================
 
@@ -58,6 +59,15 @@ export interface Connector {
   readonly capabilities: ConnectorCapabilities
   /** Send a structured payload through this connector. */
   send(payload: SendPayload): Promise<SendResult>
+  /**
+   * Optional: stream AI response events to the client in real-time.
+   * Connectors that support this can push ProviderEvents (tool_use, tool_result, text)
+   * as they arrive, then deliver the final result at the end.
+   *
+   * If not implemented, ConnectorCenter falls back to draining the stream
+   * and calling send() with the completed result.
+   */
+  sendStream?(stream: StreamableResult, meta?: Pick<SendPayload, 'kind' | 'source'>): Promise<SendResult>
 }
 
 // ==================== Notify Types ====================
@@ -136,6 +146,37 @@ export class ConnectorCenter {
     if (!target) return { delivered: false }
 
     const payload = this.buildPayload(text, opts)
+    const result = await target.send(payload)
+    return { ...result, channel: target.channel }
+  }
+
+  /**
+   * Stream a notification to the last-interacted connector.
+   * If the connector supports sendStream, delegates streaming directly.
+   * Otherwise drains the stream and falls back to send() with the completed result.
+   */
+  async notifyStream(stream: StreamableResult, opts?: NotifyOpts): Promise<NotifyResult> {
+    const target = this.resolveTarget()
+    if (!target) {
+      await stream // drain to prevent hanging generator
+      return { delivered: false }
+    }
+
+    if (target.sendStream) {
+      const result = await target.sendStream(stream, {
+        kind: opts?.kind ?? 'notification',
+        source: opts?.source,
+      })
+      return { ...result, channel: target.channel }
+    }
+
+    // Fallback: drain stream, send completed result
+    const completed = await stream
+    const payload = this.buildPayload(completed.text, {
+      kind: opts?.kind,
+      media: completed.media,
+      source: opts?.source,
+    })
     const result = await target.send(payload)
     return { ...result, channel: target.channel }
   }

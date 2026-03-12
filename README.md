@@ -16,10 +16,10 @@ Your one-person Wall Street. Alice is an AI trading agent that gives you your ow
 
 ## Features
 
-- **Dual AI provider** — switch between Claude Code CLI and Vercel AI SDK at runtime, no restart needed
+- **Multi-provider AI** — switch between Claude Code CLI, Vercel AI SDK, and Agent SDK at runtime, no restart needed
 - **Unified trading** — multi-account architecture supporting CCXT (Bybit, OKX, Binance, etc.) and Alpaca (US equities) with a git-like workflow (stage, commit, push)
 - **Guard pipeline** — extensible pre-execution safety checks (max position size, cooldown between trades, symbol whitelist)
-- **Market data** — OpenBB-powered equity, crypto, commodity, and currency data layers with unified symbol search (`marketSearchForResearch`) and technical indicator calculator
+- **Market data** — TypeScript-native OpenBB engine (`opentypebb`) with no external sidecar required. Covers equity, crypto, commodity, currency, and macro data with unified symbol search (`marketSearchForResearch`) and technical indicator calculator. Can also expose an embedded OpenBB-compatible HTTP API for external tools
 - **Equity research** — company profiles, financial statements, ratios, analyst estimates, earnings calendar, insider trading, and market movers (top gainers, losers, most active)
 - **News collector** — background RSS collection from configurable feeds with archive search tools (`globNews`/`grepNews`/`readNews`). Also captures OpenBB news API results via piggyback
 - **Cognitive state** — persistent "brain" with frontal lobe memory, emotion tracking, and commit history
@@ -27,11 +27,11 @@ Your one-person Wall Street. Alice is an AI trading agent that gives you your ow
 - **Cron scheduling** — event-driven cron system with AI-powered job execution and automatic delivery to the last-interacted channel
 - **Evolution mode** — two-tier permission system. Normal mode sandboxes the AI to `data/brain/`; evolution mode gives full project access including Bash, enabling the agent to modify its own source code
 - **Hot-reload** — enable/disable connectors (Telegram, MCP Ask) and reconnect trading engines at runtime without restart
-- **Web UI** — local chat interface with portfolio dashboard and full config management (trading, data sources, connectors, settings)
+- **Web UI** — local chat interface with real-time SSE streaming, sub-channels with per-channel AI config, portfolio dashboard, and full config management (trading, data sources, connectors, AI provider, heartbeat, tools)
 
 ## Key Concepts
 
-**Provider** — The AI backend that powers Alice. Claude Code (subprocess) or Vercel AI SDK (in-process). Switchable at runtime via `ai-provider.json`.
+**Provider** — The AI backend that powers Alice. Claude Code (subprocess), Vercel AI SDK (in-process), or Agent SDK (`@anthropic-ai/claude-agent-sdk`). Switchable at runtime via `ai-provider.json`.
 
 **Extension** — A self-contained tool package registered in ToolCenter. Each extension owns its tools, state, and persistence. Examples: trading, brain, analysis-kit.
 
@@ -39,7 +39,7 @@ Your one-person Wall Street. Alice is an AI trading agent that gives you your ow
 
 **Guard** — A pre-execution check that runs before every trading operation reaches the exchange. Guards enforce limits (max position size, cooldown between trades, symbol whitelist) and can be configured per-asset.
 
-**Connector** — An external interface through which users interact with Alice. Built-in: Web UI, Telegram, MCP Ask. Connectors register with the ConnectorRegistry; delivery always goes to the channel of last interaction.
+**Connector** — An external interface through which users interact with Alice. Built-in: Web UI, Telegram, MCP Ask. Connectors register with ConnectorCenter; delivery always goes to the channel of last interaction.
 
 **Brain** — Alice's persistent cognitive state. The frontal lobe stores working memory across rounds; emotion tracking logs sentiment shifts with rationale. Both are versioned as commits.
 
@@ -56,16 +56,16 @@ graph LR
   subgraph Providers
     CC[Claude Code CLI]
     VS[Vercel AI SDK]
+    AS[Agent SDK]
   end
 
   subgraph Core
     PR[ProviderRouter]
     AC[AgentCenter]
-    E[Engine]
     TC[ToolCenter]
     S[Session Store]
     EL[Event Log]
-    CR[Connector Registry]
+    CCR[ConnectorCenter]
   end
 
   subgraph Extensions
@@ -86,15 +86,14 @@ graph LR
   subgraph Interfaces
     WEB[Web UI]
     TG[Telegram]
-    HTTP[HTTP API]
     MCP[MCP Server]
   end
 
   CC --> PR
   VS --> PR
+  AS --> PR
   PR --> AC
-  AC --> E
-  E --> S
+  AC --> S
   TC -->|Vercel tools| VS
   TC -->|MCP tools| MCP
   OBB --> AK
@@ -108,23 +107,22 @@ graph LR
   CRON --> EL
   HB --> CRON
   EL --> CRON
-  CR --> WEB
-  CR --> TG
-  WEB --> E
-  TG --> E
-  HTTP --> E
-  MCP --> E
+  CCR --> WEB
+  CCR --> TG
+  WEB --> AC
+  TG --> AC
+  MCP --> AC
 ```
 
-**Providers** — interchangeable AI backends. Claude Code spawns `claude -p` as a subprocess; Vercel AI SDK runs a `ToolLoopAgent` in-process. `ProviderRouter` reads `ai-provider.json` on each call to select the active backend at runtime.
+**Providers** — interchangeable AI backends. Claude Code spawns `claude -p` as a subprocess; Vercel AI SDK runs a `ToolLoopAgent` in-process; Agent SDK uses `@anthropic-ai/claude-agent-sdk`. `ProviderRouter` reads `ai-provider.json` on each call to select the active backend at runtime.
 
-**Core** — `Engine` is a thin facade that delegates to `AgentCenter`, which routes all calls (both stateless and session-aware) through `ProviderRouter`. `ToolCenter` is a centralized tool registry — extensions register tools there, and it exports them in Vercel AI SDK and MCP formats. `EventLog` provides persistent append-only event storage (JSONL) with real-time subscriptions and crash recovery. `ConnectorRegistry` tracks which channel the user last spoke through.
+**Core** — `AgentCenter` is the top-level orchestration center that routes all calls (both stateless and session-aware) through `ProviderRouter`. `ToolCenter` is a centralized tool registry — extensions register tools there, and it exports them in Vercel AI SDK and MCP formats. `EventLog` provides persistent append-only event storage (JSONL) with real-time subscriptions and crash recovery. `ConnectorCenter` tracks which channel the user last spoke through.
 
 **Extensions** — domain-specific tool sets registered in `ToolCenter`. Each extension owns its tools, state, and persistence. `Guards` enforce pre-execution safety checks (position size limits, trade cooldowns, symbol whitelist) on all trading operations. `NewsCollector` runs background RSS fetches and piggybacks OpenBB news calls into a persistent archive searchable by the agent.
 
-**Tasks** — scheduled background work. `CronEngine` manages jobs and fires `cron.fire` events into the EventLog on schedule; a listener picks them up, runs them through the AI engine, and delivers replies via the ConnectorRegistry. `Heartbeat` is a periodic health-check that uses a structured response protocol (HEARTBEAT_OK / CHAT_NO / CHAT_YES).
+**Tasks** — scheduled background work. `CronEngine` manages jobs and fires `cron.fire` events into the EventLog on schedule; a listener picks them up, runs them through `AgentCenter`, and delivers replies via `ConnectorCenter`. `Heartbeat` is a periodic health-check that uses a structured response protocol (HEARTBEAT_OK / CHAT_NO / CHAT_YES).
 
-**Interfaces** — external surfaces. Web UI for local chat, Telegram bot for mobile, HTTP for webhooks, MCP server for tool exposure. External agents can also [converse with Alice via a separate MCP endpoint](docs/mcp-ask-connector.md).
+**Interfaces** — external surfaces. Web UI for local chat (with SSE streaming and sub-channels), Telegram bot for mobile, MCP server for tool exposure. External agents can also [converse with Alice via a separate MCP endpoint](docs/mcp-ask-connector.md).
 
 ## Quick Start
 
@@ -152,21 +150,25 @@ pnpm test       # run tests
 
 All config lives in `data/config/` as JSON files with Zod validation. Missing files fall back to sensible defaults. You can edit these files directly or use the Web UI.
 
-**AI Provider** — The default provider is Claude Code (`claude -p` subprocess). To use the [Vercel AI SDK](https://sdk.vercel.ai/docs) instead (Anthropic, OpenAI, Google, etc.), switch `ai-provider.json` to `vercel-ai-sdk` and add your API key to `api-keys.json`.
+**AI Provider** — The default provider is Claude Code (`claude -p` subprocess). To use the [Vercel AI SDK](https://sdk.vercel.ai/docs) instead (Anthropic, OpenAI, Google, etc.), switch `ai-provider.json` to `vercel-ai-sdk` and add your API key to `api-keys.json`. A third option, Agent SDK (`@anthropic-ai/claude-agent-sdk`), is also available via `agent-sdk`.
 
 **Trading** — Multi-account architecture. Crypto via [CCXT](https://docs.ccxt.com/) (Bybit, OKX, Binance, etc.) configured in `crypto.json`. US equities via [Alpaca](https://alpaca.markets/) configured in `securities.json`. Both use the same git-like trading workflow.
 
 | File | Purpose |
 |------|---------|
 | `engine.json` | Trading pairs, tick interval, timeframe |
-| `model.json` | AI model provider and model name |
 | `agent.json` | Max agent steps, evolution mode toggle, Claude Code tool permissions |
-| `ai-provider.json` | Active AI provider (`vercel-ai-sdk` or `claude-code`), switchable at runtime |
+| `ai-provider.json` | Active AI provider (`claude-code`, `vercel-ai-sdk`, or `agent-sdk`), switchable at runtime |
 | `api-keys.json` | AI provider API keys (Anthropic, OpenAI, Google) — only needed for Vercel AI SDK mode |
+| `platforms.json` | Trading platform definitions (CCXT exchanges, Alpaca) |
+| `accounts.json` | Trading account credentials and guard config, references platforms |
 | `crypto.json` | CCXT exchange config + API keys, allowed symbols, guards |
 | `securities.json` | Alpaca broker config + API keys, allowed symbols, guards |
-| `connectors.json` | Web/MCP server ports, Telegram bot credentials + enable, MCP Ask enable |
-| `openbb.json` | OpenBB API URL, per-asset-class data providers, provider API keys |
+| `connectors.json` | Web/MCP server ports, MCP Ask enable |
+| `telegram.json` | Telegram bot credentials + enable |
+| `web-subchannels.json` | Web UI sub-channel definitions with per-channel AI provider overrides |
+| `tools.json` | Tool enable/disable configuration |
+| `openbb.json` | Data backend (`sdk` / `openbb`), per-asset-class providers, provider API keys, embedded HTTP server config |
 | `news-collector.json` | RSS feeds, fetch interval, retention period, OpenBB piggyback toggle |
 | `compaction.json` | Context window limits, auto-compaction thresholds |
 | `heartbeat.json` | Heartbeat enable/disable, interval, active hours |
@@ -186,21 +188,25 @@ On first run, defaults are auto-copied to the user override path. Edit the user 
 src/
   main.ts                    # Composition root — wires everything together
   core/
-    engine.ts                # Thin facade, delegates to AgentCenter
-    agent-center.ts          # Centralized AI agent management, owns ProviderRouter
+    agent-center.ts          # Top-level AI orchestration center, owns ProviderRouter
     ai-provider.ts           # AIProvider interface + ProviderRouter (runtime switching)
     tool-center.ts           # Centralized tool registry (Vercel + MCP export)
     ai-config.ts             # Runtime provider config read/write
+    model-factory.ts         # Model instance factory for Vercel AI SDK
     session.ts               # JSONL session store + format converters
     compaction.ts            # Auto-summarize long context windows
     config.ts                # Zod-validated config loader
     event-log.ts             # Persistent append-only event log (JSONL)
-    connector-registry.ts    # Last-interacted channel tracker
+    connector-center.ts      # ConnectorCenter — push delivery + last-interacted tracking
+    async-channel.ts         # AsyncChannel for streaming provider events to SSE
+    provider-utils.ts        # Shared provider utilities (session conversion, tool bridging)
     media.ts                 # MediaAttachment extraction from tool outputs
+    media-store.ts           # Media file persistence
     types.ts                 # Plugin, EngineContext interfaces
-  providers/
+  ai-providers/
     claude-code/             # Claude Code CLI subprocess wrapper
     vercel-ai-sdk/           # Vercel AI SDK ToolLoopAgent wrapper
+    agent-sdk/               # Agent SDK (@anthropic-ai/claude-agent-sdk) wrapper
   extension/
     analysis-kit/            # Indicator calculator and market data tools
     equity/                  # Equity fundamentals and data adapter
@@ -212,21 +218,23 @@ src/
     brain/                   # Cognitive state (memory, emotion)
     browser/                 # Browser automation bridge (via OpenClaw)
   openbb/
-    equity/                  # OpenBB equity data layer (price, fundamentals, estimates, etc.)
-    crypto/                  # OpenBB crypto data layer
-    currency/                # OpenBB currency data layer
-    commodity/               # OpenBB commodity data layer (EIA, spot prices)
-    economy/                 # OpenBB macro economy data layer
-    news/                    # OpenBB news data layer
+    sdk/                     # In-process opentypebb SDK clients (equity, crypto, currency, news, economy, commodity)
+    api-server.ts            # Embedded OpenBB-compatible HTTP server (optional, port 6901)
+    equity/                  # Equity data layer + SymbolIndex (SEC/TMX local cache)
+    crypto/                  # Crypto data layer
+    currency/                # Currency/forex data layer
+    commodity/               # Commodity data layer (EIA, spot prices)
+    economy/                 # Macro economy data layer
+    news/                    # News data layer
+    credential-map.ts        # Maps config key names to OpenBB credential field names
   connectors/
-    web/                     # Web UI chat (Hono, SSE push)
+    web/                     # Web UI chat (Hono, SSE streaming, sub-channels)
     telegram/                # Telegram bot (grammY, polling, commands)
     mcp-ask/                 # MCP Ask connector (external agent conversation)
   task/
     cron/                    # Cron scheduling (engine, listener, AI tools)
     heartbeat/               # Periodic heartbeat with structured response protocol
   plugins/
-    http.ts                  # HTTP health/status endpoint
     mcp.ts                   # MCP server for tool exposure
   skills/                    # Agent skill definitions
   openclaw/                  # Browser automation subsystem (frozen)

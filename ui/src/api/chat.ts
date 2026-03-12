@@ -2,11 +2,11 @@ import { headers } from './client'
 import type { ChatResponse, ChatHistoryItem } from './types'
 
 export const chatApi = {
-  async send(message: string): Promise<ChatResponse> {
+  async send(message: string, channelId?: string): Promise<ChatResponse> {
     const res = await fetch('/api/chat', {
       method: 'POST',
       headers,
-      body: JSON.stringify({ message }),
+      body: JSON.stringify({ message, ...(channelId ? { channelId } : {}) }),
     })
     if (!res.ok) {
       const err = await res.json().catch(() => ({ error: res.statusText }))
@@ -15,14 +15,20 @@ export const chatApi = {
     return res.json()
   },
 
-  async history(limit = 100): Promise<{ messages: ChatHistoryItem[] }> {
-    const res = await fetch(`/api/chat/history?limit=${limit}`)
+  async history(limit = 100, channel?: string): Promise<{ messages: ChatHistoryItem[] }> {
+    const params = new URLSearchParams({ limit: String(limit) })
+    if (channel) params.set('channel', channel)
+    const res = await fetch(`/api/chat/history?${params}`)
     if (!res.ok) throw new Error('Failed to load history')
     return res.json()
   },
 
-  connectSSE(onMessage: (data: { type: string; kind?: string; text: string; media?: Array<{ type: string; url: string }> }) => void): EventSource {
-    const es = new EventSource('/api/chat/events')
+  connectSSE(
+    onMessage: (data: { type: string; kind?: string; text: string; media?: Array<{ type: string; url: string }> }) => void,
+    channel?: string,
+  ): EventSource {
+    const url = channel ? `/api/chat/events?channel=${encodeURIComponent(channel)}` : '/api/chat/events'
+    const es = new EventSource(url)
     es.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data)

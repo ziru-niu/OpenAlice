@@ -1,13 +1,16 @@
-import { Hono } from 'hono'
+import { Hono, type Context } from 'hono'
 import { cors } from 'hono/cors'
 import { serve } from '@hono/node-server'
 import { serveStatic } from '@hono/node-server/serve-static'
 import { resolve } from 'node:path'
 import type { Plugin, EngineContext } from '../../core/types.js'
 import { SessionStore, type ContentBlock } from '../../core/session.js'
-import type { ConnectorCenter, Connector } from '../../core/connector-center.js'
+import type { Connector, SendPayload } from '../../core/connector-center.js'
+import type { StreamableResult } from '../../core/ai-provider.js'
 import { persistMedia } from '../../core/media-store.js'
+import { readWebSubchannels } from '../../core/config.js'
 import { createChatRoutes, createMediaRoutes, type SSEClient } from './routes/chat.js'
+import { createChannelsRoutes } from './routes/channels.js'
 import { createConfigRoutes, createOpenbbRoutes } from './routes/config.js'
 import { createEventsRoutes } from './routes/events.js'
 import { createCronRoutes } from './routes/cron.js'
@@ -24,19 +27,38 @@ export interface WebConfig {
 export class WebPlugin implements Plugin {
   name = 'web'
   private server: ReturnType<typeof serve> | null = null
-  private sseClients = new Map<string, SSEClient>()
+  /** SSE clients grouped by channel ID. Default channel: 'default'. */
+  private sseByChannel = new Map<string, Map<string, SSEClient>>()
   private unregisterConnector?: () => void
 
   constructor(private config: WebConfig) {}
 
   async start(ctx: EngineContext) {
-    // Initialize session (mirrors Telegram's per-user pattern, single user for web)
-    const session = new SessionStore('web/default')
-    await session.restore()
+    // Load sub-channel definitions
+    const subChannels = await readWebSubchannels()
+
+    // Initialize sessions for the default channel and all sub-channels
+    const sessions = new Map<string, SessionStore>()
+
+    const defaultSession = new SessionStore('web/default')
+    await defaultSession.restore()
+    sessions.set('default', defaultSession)
+
+    for (const ch of subChannels) {
+      const session = new SessionStore(`web/${ch.id}`)
+      await session.restore()
+      sessions.set(ch.id, session)
+    }
+
+    // Initialize SSE map for known channels (entries are created lazily too)
+    this.sseByChannel.set('default', new Map())
+    for (const ch of subChannels) {
+      this.sseByChannel.set(ch.id, new Map())
+    }
 
     const app = new Hono()
 
-    app.onError((err, c) => {
+    app.onError((err: Error, c: Context) => {
       if (err instanceof SyntaxError) {
         return c.json({ error: 'Invalid JSON' }, 400)
       }
@@ -47,7 +69,8 @@ export class WebPlugin implements Plugin {
     app.use('/api/*', cors())
 
     // ==================== Mount route modules ====================
-    app.route('/api/chat', createChatRoutes({ ctx, session, sseClients: this.sseClients }))
+    app.route('/api/chat', createChatRoutes({ ctx, sessions, sseByChannel: this.sseByChannel }))
+    app.route('/api/channels', createChannelsRoutes({ sessions, sseByChannel: this.sseByChannel }))
     app.route('/api/media', createMediaRoutes())
     app.route('/api/config', createConfigRoutes({
       onConnectorsChange: async () => { await ctx.reconnectConnectors() },
@@ -67,8 +90,9 @@ export class WebPlugin implements Plugin {
     app.get('*', serveStatic({ root: uiRoot, path: 'index.html' }))
 
     // ==================== Connector registration ====================
+    // The web connector only targets the main 'default' channel (heartbeat/cron notifications).
     this.unregisterConnector = ctx.connectorCenter.register(
-      this.createConnector(this.sseClients, session),
+      this.createConnector(this.sseByChannel, defaultSession),
     )
 
     // ==================== Start server ====================
@@ -78,13 +102,13 @@ export class WebPlugin implements Plugin {
   }
 
   async stop() {
-    this.sseClients.clear()
+    this.sseByChannel.clear()
     this.unregisterConnector?.()
     this.server?.close()
   }
 
   private createConnector(
-    sseClients: Map<string, SSEClient>,
+    sseByChannel: Map<string, Map<string, SSEClient>>,
     session: SessionStore,
   ): Connector {
     return {
@@ -107,7 +131,9 @@ export class WebPlugin implements Plugin {
           source: payload.source,
         })
 
-        for (const client of sseClients.values()) {
+        // Only broadcast to default channel SSE clients (heartbeat/cron stay in main channel)
+        const defaultClients = sseByChannel.get('default') ?? new Map()
+        for (const client of defaultClients.values()) {
           try { client.send(data) } catch { /* client disconnected */ }
         }
 
@@ -116,12 +142,59 @@ export class WebPlugin implements Plugin {
           { type: 'text', text: payload.text },
           ...media.map((m) => ({ type: 'image' as const, url: m.url })),
         ]
-        await session.appendAssistant(blocks, 'engine', {
+        await session.appendAssistant(blocks, 'vercel-ai', {
           kind: payload.kind,
           source: payload.source,
         })
 
-        return { delivered: sseClients.size > 0 }
+        return { delivered: defaultClients.size > 0 }
+      },
+
+      sendStream: async (stream: StreamableResult, meta?: Pick<SendPayload, 'kind' | 'source'>) => {
+        const defaultClients = sseByChannel.get('default') ?? new Map()
+
+        // Push streaming events to SSE clients as they arrive
+        for await (const event of stream) {
+          if (event.type === 'done') continue
+          const data = JSON.stringify({ type: 'stream', event })
+          for (const client of defaultClients.values()) {
+            try { client.send(data) } catch { /* disconnected */ }
+          }
+        }
+
+        // Get completed result (resolves immediately — drain already finished)
+        const result = await stream
+
+        // Persist media
+        const media: Array<{ type: 'image'; url: string }> = []
+        for (const m of result.media) {
+          const name = await persistMedia(m.path)
+          media.push({ type: 'image', url: `/api/media/${name}` })
+        }
+
+        // Push final message to SSE (same format as send())
+        const data = JSON.stringify({
+          type: 'message',
+          kind: meta?.kind ?? 'notification',
+          text: result.text,
+          media: media.length > 0 ? media : undefined,
+          source: meta?.source,
+        })
+        for (const client of defaultClients.values()) {
+          try { client.send(data) } catch { /* disconnected */ }
+        }
+
+        // Persist to session (push notifications appear in web chat history)
+        const blocks: ContentBlock[] = [
+          { type: 'text', text: result.text },
+          ...media.map((m) => ({ type: 'image' as const, url: m.url })),
+        ]
+        await session.appendAssistant(blocks, 'vercel-ai', {
+          kind: meta?.kind ?? 'notification',
+          source: meta?.source,
+        })
+
+        return { delivered: defaultClients.size > 0 }
       },
     }
   }

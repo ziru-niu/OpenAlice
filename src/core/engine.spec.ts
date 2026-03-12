@@ -1,8 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import type { LanguageModel, Tool } from 'ai'
 import { MockLanguageModelV3 } from 'ai/test'
-import { Engine } from './engine.js'
 import { AgentCenter } from './agent-center.js'
+import { GenerateRouter } from './ai-provider.js'
 import { DEFAULT_COMPACTION_CONFIG, type CompactionConfig } from './compaction.js'
 import { VercelAIProvider } from '../ai-providers/vercel-ai-sdk/vercel-provider.js'
 import { createModelFromConfig } from './model-factory.js'
@@ -27,7 +27,7 @@ function makeMockModel(text = 'mock response') {
   return new MockLanguageModelV3({ doGenerate: makeDoGenerate(text) })
 }
 
-interface MakeEngineOpts {
+interface MakeAgentCenterOpts {
   model?: LanguageModel
   tools?: Record<string, Tool>
   instructions?: string
@@ -35,7 +35,7 @@ interface MakeEngineOpts {
   compaction?: CompactionConfig
 }
 
-function makeEngine(overrides: MakeEngineOpts = {}): Engine {
+function makeAgentCenter(overrides: MakeAgentCenterOpts = {}): AgentCenter {
   const model = overrides.model ?? makeMockModel()
   const tools = overrides.tools ?? {}
   const instructions = overrides.instructions ?? 'You are a test agent.'
@@ -43,10 +43,10 @@ function makeEngine(overrides: MakeEngineOpts = {}): Engine {
   const compaction = overrides.compaction ?? DEFAULT_COMPACTION_CONFIG
 
   vi.mocked(createModelFromConfig).mockResolvedValue({ model, key: 'test:mock-model' })
-  const provider = new VercelAIProvider(() => tools, instructions, maxSteps, compaction)
-  const agentCenter = new AgentCenter(provider)
+  const provider = new VercelAIProvider(() => tools, instructions, maxSteps)
+  const router = new GenerateRouter(provider, null)
 
-  return new Engine({ agentCenter })
+  return new AgentCenter({ router, compaction })
 }
 
 /** In-memory SessionStore mock (no filesystem). */
@@ -104,7 +104,7 @@ vi.mock('./compaction.js', async (importOriginal) => {
 
 // ==================== Tests ====================
 
-describe('Engine', () => {
+describe('AgentCenter', () => {
   beforeEach(() => {
     vi.clearAllMocks()
   })
@@ -112,9 +112,9 @@ describe('Engine', () => {
   // -------------------- Construction --------------------
 
   describe('constructor', () => {
-    it('creates an engine with agentCenter', () => {
-      const engine = makeEngine({ instructions: 'custom instructions' })
-      expect(engine).toBeInstanceOf(Engine)
+    it('creates an AgentCenter with router and compaction', () => {
+      const agentCenter = makeAgentCenter({ instructions: 'custom instructions' })
+      expect(agentCenter).toBeInstanceOf(AgentCenter)
     })
   })
 
@@ -123,9 +123,9 @@ describe('Engine', () => {
   describe('ask()', () => {
     it('returns text from the model', async () => {
       const model = makeMockModel('hello world')
-      const engine = makeEngine({ model })
+      const agentCenter = makeAgentCenter({ model })
 
-      const result = await engine.ask('say hello')
+      const result = await agentCenter.ask('say hello')
       expect(result.text).toBe('hello world')
       expect(result.media).toEqual([])
     })
@@ -142,21 +142,17 @@ describe('Engine', () => {
           warnings: [],
         },
       })
-      const engine = makeEngine({ model })
+      const agentCenter = makeAgentCenter({ model })
 
-      const result = await engine.ask('empty response')
+      const result = await agentCenter.ask('empty response')
       expect(result.text).toBe('')
     })
 
-    it('collects media from tool results via onStepFinish', async () => {
-      // Use a model that produces tool calls to test media extraction.
-      // Since MockLanguageModelV3 doesn't easily simulate multi-step tool calls,
-      // we'll test media extraction at the unit level separately.
-      // Here we verify the basic flow returns empty media when no tools produce media.
+    it('returns empty media when no tools produce media', async () => {
       const model = makeMockModel('no media')
-      const engine = makeEngine({ model })
+      const agentCenter = makeAgentCenter({ model })
 
-      const result = await engine.ask('test')
+      const result = await agentCenter.ask('test')
       expect(result.media).toEqual([])
     })
   })
@@ -166,30 +162,30 @@ describe('Engine', () => {
   describe('askWithSession()', () => {
     it('appends user message to session before generating', async () => {
       const model = makeMockModel('session response')
-      const engine = makeEngine({ model })
+      const agentCenter = makeAgentCenter({ model })
       const session = makeSessionMock()
 
-      await engine.askWithSession('user prompt', session)
+      await agentCenter.askWithSession('user prompt', session)
 
       expect(session.appendUser).toHaveBeenCalledWith('user prompt', 'human')
     })
 
     it('appends assistant response to session after generating', async () => {
       const model = makeMockModel('assistant reply')
-      const engine = makeEngine({ model })
+      const agentCenter = makeAgentCenter({ model })
       const session = makeSessionMock()
 
-      await engine.askWithSession('hello', session)
+      await agentCenter.askWithSession('hello', session)
 
-      expect(session.appendAssistant).toHaveBeenCalledWith('assistant reply', 'engine')
+      expect(session.appendAssistant).toHaveBeenCalledWith('assistant reply', 'vercel-ai')
     })
 
     it('returns the generated text and empty media', async () => {
       const model = makeMockModel('generated text')
-      const engine = makeEngine({ model })
+      const agentCenter = makeAgentCenter({ model })
       const session = makeSessionMock()
 
-      const result = await engine.askWithSession('prompt', session)
+      const result = await agentCenter.askWithSession('prompt', session)
       expect(result.text).toBe('generated text')
       expect(result.media).toEqual([])
     })
@@ -203,10 +199,10 @@ describe('Engine', () => {
         autoCompactBuffer: 5_000,
         microcompactKeepRecent: 2,
       }
-      const engine = makeEngine({ model, compaction })
+      const agentCenter = makeAgentCenter({ model, compaction })
       const session = makeSessionMock()
 
-      await engine.askWithSession('test', session)
+      await agentCenter.askWithSession('test', session)
 
       expect(compactIfNeeded).toHaveBeenCalledWith(
         session,
@@ -232,10 +228,10 @@ describe('Engine', () => {
       })
 
       const model = makeMockModel('from compacted')
-      const engine = makeEngine({ model })
+      const agentCenter = makeAgentCenter({ model })
       const session = makeSessionMock()
 
-      const result = await engine.askWithSession('test', session)
+      const result = await agentCenter.askWithSession('test', session)
       expect(result.text).toBe('from compacted')
       // readActive should NOT be called when activeEntries is provided
       expect(session.readActive).not.toHaveBeenCalled()
@@ -249,10 +245,10 @@ describe('Engine', () => {
       })
 
       const model = makeMockModel('from readActive')
-      const engine = makeEngine({ model })
+      const agentCenter = makeAgentCenter({ model })
       const session = makeSessionMock()
 
-      await engine.askWithSession('test', session)
+      await agentCenter.askWithSession('test', session)
       expect(session.readActive).toHaveBeenCalled()
     })
   })
@@ -264,9 +260,9 @@ describe('Engine', () => {
       const model = new MockLanguageModelV3({
         doGenerate: async () => { throw new Error('boom') },
       })
-      const engine = makeEngine({ model })
+      const agentCenter = makeAgentCenter({ model })
 
-      await expect(engine.ask('fail')).rejects.toThrow('boom')
+      await expect(agentCenter.ask('fail')).rejects.toThrow('boom')
     })
   })
 })

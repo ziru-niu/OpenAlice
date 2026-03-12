@@ -11,6 +11,7 @@ import { tradingApi } from './trading'
 import { openbbApi } from './openbb'
 import { devApi } from './dev'
 import { toolsApi } from './tools'
+import { channelsApi } from './channels'
 export const api = {
   chat: chatApi,
   config: configApi,
@@ -21,13 +22,17 @@ export const api = {
   openbb: openbbApi,
   dev: devApi,
   tools: toolsApi,
+  channels: channelsApi,
 }
 
 // Re-export all types for convenience
 export type {
+  WebChannel,
+  VercelAiSdkOverride,
   ChatMessage,
   ChatResponse,
   ToolCall,
+  StreamingToolCall,
   ChatHistoryItem,
   AppConfig,
   AIProviderConfig,

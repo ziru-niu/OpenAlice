@@ -16,27 +16,45 @@ export interface ModelFromConfig {
   key: string
 }
 
-export async function createModelFromConfig(): Promise<ModelFromConfig> {
-  const config = await readAIProviderConfig()
-  const key = `${config.provider}:${config.model}:${config.baseUrl ?? ''}`
+/** Per-request model override (e.g. from a sub-channel's vercelAiSdk config). */
+export interface ModelOverride {
+  provider: string
+  model: string
+  baseUrl?: string
+  apiKey?: string
+}
 
-  switch (config.provider) {
+export async function createModelFromConfig(override?: ModelOverride): Promise<ModelFromConfig> {
+  // Resolve effective values: override takes precedence over global config
+  const config = await readAIProviderConfig()
+  const p = override?.provider ?? config.provider
+  const m = override?.model ?? config.model
+  const url = override?.baseUrl ?? config.baseUrl
+  const key = `${p}:${m}:${url ?? ''}`
+
+  // Resolve API key: override.apiKey > global config.apiKeys[provider]
+  const resolveApiKey = (provider: string) => {
+    if (override?.apiKey) return override.apiKey
+    return (config.apiKeys as Record<string, string | undefined>)[provider] || undefined
+  }
+
+  switch (p) {
     case 'anthropic': {
       const { createAnthropic } = await import('@ai-sdk/anthropic')
-      const client = createAnthropic({ apiKey: config.apiKeys.anthropic || undefined, baseURL: config.baseUrl || undefined })
-      return { model: client(config.model), key }
+      const client = createAnthropic({ apiKey: resolveApiKey('anthropic'), baseURL: url || undefined })
+      return { model: client(m), key }
     }
     case 'openai': {
       const { createOpenAI } = await import('@ai-sdk/openai')
-      const client = createOpenAI({ apiKey: config.apiKeys.openai || undefined, baseURL: config.baseUrl || undefined })
-      return { model: client(config.model), key }
+      const client = createOpenAI({ apiKey: resolveApiKey('openai'), baseURL: url || undefined })
+      return { model: client(m), key }
     }
     case 'google': {
       const { createGoogleGenerativeAI } = await import('@ai-sdk/google')
-      const client = createGoogleGenerativeAI({ apiKey: config.apiKeys.google || undefined, baseURL: config.baseUrl || undefined })
-      return { model: client(config.model), key }
+      const client = createGoogleGenerativeAI({ apiKey: resolveApiKey('google'), baseURL: url || undefined })
+      return { model: client(m), key }
     }
     default:
-      throw new Error(`Unsupported model provider: "${config.provider}". Supported: anthropic, openai, google`)
+      throw new Error(`Unsupported model provider: "${p}". Supported: anthropic, openai, google`)
   }
 }

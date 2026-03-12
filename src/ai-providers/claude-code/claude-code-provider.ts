@@ -1,25 +1,26 @@
 /**
- * ClaudeCodeProvider — AIProvider implementation backed by the Claude Code CLI.
+ * ClaudeCodeProvider — GenerateProvider backed by the Claude Code CLI.
  *
- * Thin adapter: delegates to askClaudeCodeWithSession which owns the full
- * session management flow (append → compact → build <chat_history> → call CLI → persist).
+ * Slim data-source adapter: only calls the CLI and yields ProviderEvents.
+ * Session management (append, compact, persist) lives in AgentCenter.
  *
  * Agent config (evolutionMode, allowedTools, disallowedTools) is re-read from
  * disk on every request so that Web UI changes take effect without restart.
  */
 
 import { resolve } from 'node:path'
-import type { AIProvider, AskOptions, ProviderResult } from '../../core/ai-provider.js'
-import type { SessionStore } from '../../core/session.js'
-import type { CompactionConfig } from '../../core/compaction.js'
+import type { ProviderResult, ProviderEvent } from '../../core/ai-provider.js'
+import type { GenerateProvider, GenerateInput, GenerateOpts } from '../../core/ai-provider.js'
 import type { ClaudeCodeConfig } from './types.js'
 import { readAgentConfig } from '../../core/config.js'
+import { extractMediaFromToolResultContent } from '../../core/media.js'
+import { createChannel } from '../../core/async-channel.js'
 import { askClaudeCode } from './provider.js'
-import { askClaudeCodeWithSession } from './session.js'
 
-export class ClaudeCodeProvider implements AIProvider {
+export class ClaudeCodeProvider implements GenerateProvider {
+  readonly inputKind = 'text' as const
+
   constructor(
-    private compaction: CompactionConfig,
     private systemPrompt?: string,
   ) {}
 
@@ -39,13 +40,38 @@ export class ClaudeCodeProvider implements AIProvider {
     return { text: result.text, media: [] }
   }
 
-  async askWithSession(prompt: string, session: SessionStore, opts?: AskOptions): Promise<ProviderResult> {
+  async *generate(input: GenerateInput, opts?: GenerateOpts): AsyncGenerator<ProviderEvent> {
+    if (input.kind !== 'text') throw new Error('ClaudeCodeProvider expects text input')
+
     const config = await this.resolveConfig()
-    return askClaudeCodeWithSession(prompt, session, {
-      claudeCode: config,
-      compaction: this.compaction,
-      ...opts,
-      systemPrompt: opts?.systemPrompt ?? this.systemPrompt,
+    const claudeCode: ClaudeCodeConfig = {
+      ...config,
+      ...(opts?.disabledTools?.length
+        ? { disallowedTools: [...(config.disallowedTools ?? []), ...opts.disabledTools] }
+        : {}),
+      systemPrompt: input.systemPrompt ?? this.systemPrompt,
+    }
+
+    const channel = createChannel<ProviderEvent>()
+    const media: import('../../core/types.js').MediaAttachment[] = []
+
+    const resultPromise = askClaudeCode(input.prompt, {
+      ...claudeCode,
+      onToolUse: ({ id, name, input: toolInput }) => {
+        channel.push({ type: 'tool_use', id, name, input: toolInput })
+      },
+      onToolResult: ({ toolUseId, content }) => {
+        media.push(...extractMediaFromToolResultContent(content))
+        channel.push({ type: 'tool_result', tool_use_id: toolUseId, content })
+      },
     })
+
+    resultPromise.then(() => channel.close()).catch((err) => channel.error(err instanceof Error ? err : new Error(String(err))))
+    yield* channel
+
+    const result = await resultPromise
+    const prefix = result.ok ? '' : '[error] '
+    yield { type: 'done', result: { text: prefix + result.text, media } }
   }
+
 }

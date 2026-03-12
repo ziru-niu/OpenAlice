@@ -14,7 +14,7 @@ const engineSchema = z.object({
 })
 
 export const aiProviderSchema = z.object({
-  backend: z.enum(['claude-code', 'vercel-ai-sdk']).default('claude-code'),
+  backend: z.enum(['claude-code', 'vercel-ai-sdk', 'agent-sdk']).default('claude-code'),
   provider: z.string().default('anthropic'),
   model: z.string().default('claude-sonnet-4-6'),
   baseUrl: z.string().min(1).optional(),
@@ -122,6 +122,11 @@ const openbbSchema = z.object({
     tiingo: z.string().optional(),
     biztoc: z.string().optional(),
   }).default({}),
+  dataBackend: z.enum(['sdk', 'openbb']).default('sdk'),
+  apiServer: z.object({
+    enabled: z.boolean().default(false),
+    port: z.number().int().min(1024).max(65535).default(6901),
+  }).default({ enabled: false, port: 6901 }),
 })
 
 const compactionSchema = z.object({
@@ -166,6 +171,41 @@ export const toolsSchema = z.object({
   /** Tool names that are disabled. Tools not listed are enabled by default. */
   disabled: z.array(z.string()).default([]),
 })
+
+/** Vercel AI SDK model override — per-channel provider/model/key/endpoint. */
+export const vercelAiSdkOverrideSchema = z.object({
+  provider: z.string(),
+  model: z.string(),
+  baseUrl: z.string().optional(),
+  apiKey: z.string().optional(),
+})
+
+/** Agent SDK model override — per-channel model/key/endpoint. */
+export const agentSdkOverrideSchema = z.object({
+  model: z.string().optional(),
+  apiKey: z.string().optional(),
+  baseUrl: z.string().optional(),
+})
+
+export const webSubchannelSchema = z.object({
+  /** URL-safe identifier. Used as session path segment: data/sessions/web/{id}.jsonl */
+  id: z.string().regex(/^[a-z0-9-_]+$/, 'id must be lowercase alphanumeric with hyphens/underscores'),
+  label: z.string().min(1),
+  /** System prompt override for this channel. */
+  systemPrompt: z.string().optional(),
+  /** AI backend override. Falls back to global config if omitted. */
+  provider: z.enum(['claude-code', 'vercel-ai-sdk', 'agent-sdk']).optional(),
+  /** Vercel AI SDK model override. Only used when provider is 'vercel-ai-sdk'. */
+  vercelAiSdk: vercelAiSdkOverrideSchema.optional(),
+  /** Agent SDK model override. Only used when provider is 'agent-sdk'. */
+  agentSdk: agentSdkOverrideSchema.optional(),
+  /** Tool names to disable in addition to the global disabled list. */
+  disabledTools: z.array(z.string()).optional(),
+})
+
+export const webSubchannelsSchema = z.array(webSubchannelSchema)
+
+export type WebChannel = z.infer<typeof webSubchannelSchema>
 
 // ==================== Platform + Account Config ====================
 
@@ -520,4 +560,17 @@ export async function writeConfigSection(section: ConfigSection, data: unknown):
   await mkdir(CONFIG_DIR, { recursive: true })
   await writeFile(resolve(CONFIG_DIR, sectionFiles[section]), JSON.stringify(validated, null, 2) + '\n')
   return validated
+}
+
+/** Read web sub-channel definitions from disk. Returns empty array if file missing. */
+export async function readWebSubchannels(): Promise<WebChannel[]> {
+  const raw = await loadJsonFile('web-subchannels.json')
+  return webSubchannelsSchema.parse(raw ?? [])
+}
+
+/** Write web sub-channel definitions to disk. */
+export async function writeWebSubchannels(channels: WebChannel[]): Promise<void> {
+  const validated = webSubchannelsSchema.parse(channels)
+  await mkdir(CONFIG_DIR, { recursive: true })
+  await writeFile(resolve(CONFIG_DIR, 'web-subchannels.json'), JSON.stringify(validated, null, 2) + '\n')
 }

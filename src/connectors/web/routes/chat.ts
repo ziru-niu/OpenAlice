@@ -4,7 +4,9 @@ import { readFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { extname, join } from 'node:path'
 import type { EngineContext } from '../../../core/types.js'
+import type { AskOptions } from '../../../core/ai-provider.js'
 import { SessionStore, toChatHistory } from '../../../core/session.js'
+import { readWebSubchannels } from '../../../core/config.js'
 import { persistMedia, resolveMediaPath } from '../../../core/media-store.js'
 
 export interface SSEClient {
@@ -14,29 +16,60 @@ export interface SSEClient {
 
 interface ChatDeps {
   ctx: EngineContext
-  session: SessionStore
-  sseClients: Map<string, SSEClient>
+  sessions: Map<string, SessionStore>
+  sseByChannel: Map<string, Map<string, SSEClient>>
 }
 
 /** Chat routes: POST /, GET /history, GET /events (SSE) */
-export function createChatRoutes({ ctx, session, sseClients }: ChatDeps) {
+export function createChatRoutes({ ctx, sessions, sseByChannel }: ChatDeps) {
   const app = new Hono()
 
   app.post('/', async (c) => {
-    const body = await c.req.json<{ message?: string }>()
+    const body = await c.req.json() as { message?: string; channelId?: string }
     const message = body.message?.trim()
     if (!message) return c.json({ error: 'message is required' }, 400)
 
+    const channelId = body.channelId ?? 'default'
+    const session = sessions.get(channelId)
+    if (!session) return c.json({ error: 'channel not found' }, 404)
+
+    // Build AskOptions from channel config (if not default)
+    const opts: AskOptions = {
+      historyPreamble: 'The following is the recent conversation from the Web UI. Use it as context if the user references earlier messages.',
+    }
+    if (channelId !== 'default') {
+      const channels = await readWebSubchannels()
+      const channel = channels.find((ch) => ch.id === channelId)
+      if (channel) {
+        if (channel.systemPrompt) opts.systemPrompt = channel.systemPrompt
+        if (channel.disabledTools?.length) opts.disabledTools = channel.disabledTools
+        if (channel.provider) opts.provider = channel.provider
+        if (channel.vercelAiSdk) opts.vercelAiSdk = channel.vercelAiSdk
+        if (channel.agentSdk) opts.agentSdk = channel.agentSdk
+      }
+    }
+
     const receivedEntry = await ctx.eventLog.append('message.received', {
-      channel: 'web', to: 'default', prompt: message,
+      channel: 'web', to: channelId, prompt: message,
     })
 
-    const result = await ctx.engine.askWithSession(message, session, {
-      historyPreamble: 'The following is the recent conversation from the Web UI. Use it as context if the user references earlier messages.',
-    })
+    const stream = ctx.agentCenter.askWithSession(message, session, opts)
+
+    // Stream events to SSE clients for this channel as they arrive
+    const channelClients = sseByChannel.get(channelId) ?? new Map()
+    for await (const event of stream) {
+      if (event.type === 'done') continue
+      const data = JSON.stringify({ type: 'stream', event })
+      for (const client of channelClients.values()) {
+        try { client.send(data) } catch { /* disconnected */ }
+      }
+    }
+
+    // Stream fully drained — await resolves immediately with cached result
+    const result = await stream
 
     await ctx.eventLog.append('message.sent', {
-      channel: 'web', to: 'default', prompt: message,
+      channel: 'web', to: channelId, prompt: message,
       reply: result.text, durationMs: Date.now() - receivedEntry.ts,
     })
 
@@ -52,14 +85,22 @@ export function createChatRoutes({ ctx, session, sseClients }: ChatDeps) {
 
   app.get('/history', async (c) => {
     const limit = Number(c.req.query('limit')) || 100
+    const channelId = c.req.query('channel') ?? 'default'
+    const session = sessions.get(channelId)
+    if (!session) return c.json({ error: 'channel not found' }, 404)
     const entries = await session.readActive()
     return c.json({ messages: toChatHistory(entries).slice(-limit) })
   })
 
   app.get('/events', (c) => {
+    const channelId = c.req.query('channel') ?? 'default'
+    // Create SSE client map for this channel if it doesn't exist yet
+    if (!sseByChannel.has(channelId)) sseByChannel.set(channelId, new Map())
+    const channelClients = sseByChannel.get(channelId)!
+
     return streamSSE(c, async (stream) => {
       const clientId = randomUUID()
-      sseClients.set(clientId, {
+      channelClients.set(clientId, {
         id: clientId,
         send: (data) => { stream.writeSSE({ data }).catch(() => {}) },
       })
@@ -70,7 +111,7 @@ export function createChatRoutes({ ctx, session, sseClients }: ChatDeps) {
 
       stream.onAbort(() => {
         clearInterval(pingInterval)
-        sseClients.delete(clientId)
+        channelClients.delete(clientId)
       })
 
       await new Promise<void>(() => {})

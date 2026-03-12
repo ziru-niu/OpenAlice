@@ -1,8 +1,10 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { api, type ChatHistoryItem, type ToolCall } from '../api'
+import { api, type ToolCall, type StreamingToolCall } from '../api'
+import type { ChannelListItem } from '../api/channels'
 import { useSSE } from '../hooks/useSSE'
-import { ChatMessage, ToolCallGroup, ThinkingIndicator } from '../components/ChatMessage'
+import { ChatMessage, ToolCallGroup, ThinkingIndicator, StreamingToolGroup } from '../components/ChatMessage'
 import { ChatInput } from '../components/ChatInput'
+import { ChannelConfigModal } from '../components/ChannelConfigModal'
 
 /** Unified display item for the message list. */
 type DisplayItem =
@@ -14,13 +16,51 @@ interface ChatPageProps {
 }
 
 export function ChatPage({ onSSEStatus }: ChatPageProps) {
+  const [channels, setChannels] = useState<ChannelListItem[]>([{ id: 'default', label: 'Alice' }])
+  const [activeChannel, setActiveChannel] = useState('default')
   const [messages, setMessages] = useState<DisplayItem[]>([])
   const [isWaiting, setIsWaiting] = useState(false)
   const [showScrollBtn, setShowScrollBtn] = useState(false)
+  const [newMsgCount, setNewMsgCount] = useState(0)
+  const [streamText, setStreamText] = useState('')
+  const [streamTools, setStreamTools] = useState<StreamingToolCall[]>([])
+  const streamTextRef = useRef('')
+  const streamToolsRef = useRef<StreamingToolCall[]>([])
+  streamToolsRef.current = streamTools
+
+  // Popover state
+  const [popoverOpen, setPopoverOpen] = useState(false)
+  const [showNewForm, setShowNewForm] = useState(false)
+  const [newChannelId, setNewChannelId] = useState('')
+  const [newChannelLabel, setNewChannelLabel] = useState('')
+  const [newChannelError, setNewChannelError] = useState('')
+  const [editingChannel, setEditingChannel] = useState<ChannelListItem | null>(null)
+  const popoverRef = useRef<HTMLDivElement>(null)
+
   const nextId = useRef(0)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const userScrolledUp = useRef(false)
   const containerRef = useRef<HTMLDivElement>(null)
+  const activeChannelRef = useRef(activeChannel)
+  activeChannelRef.current = activeChannel
+
+  const isOnSubChannel = activeChannel !== 'default'
+  const subChannels = channels.filter((ch) => ch.id !== 'default')
+  const activeChannelConfig = channels.find((ch) => ch.id === activeChannel)
+
+  // Close popover on outside click
+  useEffect(() => {
+    if (!popoverOpen) return
+    const handler = (e: MouseEvent) => {
+      if (popoverRef.current && !popoverRef.current.contains(e.target as Node)) {
+        setPopoverOpen(false)
+        setShowNewForm(false)
+        setNewChannelError('')
+      }
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [popoverOpen])
 
   // Auto-scroll to bottom
   const scrollToBottom = useCallback(() => {
@@ -29,7 +69,7 @@ export function ChatPage({ onSSEStatus }: ChatPageProps) {
     }
   }, [])
 
-  useEffect(scrollToBottom, [messages, isWaiting, scrollToBottom])
+  useEffect(scrollToBottom, [messages, isWaiting, streamText, streamTools, scrollToBottom])
 
   // Detect user scroll
   useEffect(() => {
@@ -40,15 +80,22 @@ export function ChatPage({ onSSEStatus }: ChatPageProps) {
       const isUp = scrollHeight - scrollTop - clientHeight > 80
       userScrolledUp.current = isUp
       setShowScrollBtn(isUp)
+      if (!isUp) setNewMsgCount(0)
     }
     el.addEventListener('scroll', onScroll)
     return () => el.removeEventListener('scroll', onScroll)
   }, [])
 
-  // Load chat history
+  // Load channels list on mount
   useEffect(() => {
-    api.chat.history(100).then(({ messages }) => {
-      setMessages(messages.map((m): DisplayItem => {
+    api.channels.list().then(({ channels: ch }) => setChannels(ch)).catch(() => {})
+  }, [])
+
+  // Load chat history when active channel changes
+  useEffect(() => {
+    const channel = activeChannel === 'default' ? undefined : activeChannel
+    api.chat.history(100, channel).then(({ messages: msgs }) => {
+      setMessages(msgs.map((m): DisplayItem => {
         if (m.kind === 'text' && m.metadata?.kind === 'notification') {
           return { ...m, role: 'notification', _id: nextId.current++ }
         }
@@ -57,36 +104,94 @@ export function ChatPage({ onSSEStatus }: ChatPageProps) {
     }).catch((err) => {
       console.warn('Failed to load history:', err)
     })
-  }, [])
+  }, [activeChannel])
 
-  // Connect SSE for push notifications + report connection status
+  // SSE for the active channel
+  const sseChannel = activeChannel === 'default' ? undefined : activeChannel
   useSSE({
-    url: '/api/chat/events',
+    url: sseChannel ? `/api/chat/events?channel=${encodeURIComponent(sseChannel)}` : '/api/chat/events',
     onMessage: (data) => {
+      // Streaming events (tool_use / tool_result / text) during AI generation
+      if (data.type === 'stream' && data.event) {
+        const ev = data.event
+        if (ev.type === 'tool_use') {
+          setStreamTools((prev) => [...prev, {
+            id: ev.id, name: ev.name, input: ev.input, status: 'running',
+          }])
+        } else if (ev.type === 'tool_result') {
+          setStreamTools((prev) => prev.map((t) =>
+            t.id === ev.tool_use_id ? { ...t, status: 'done' as const, result: ev.content } : t,
+          ))
+        } else if (ev.type === 'text') {
+          streamTextRef.current += ev.text
+          setStreamText(streamTextRef.current)
+        }
+        return
+      }
+
+      // Push notifications (heartbeat, cron, etc.)
       if (data.type === 'message' && data.text) {
         const role = data.kind === 'message' ? 'assistant' : 'notification'
         setMessages((prev) => [
           ...prev,
           { kind: 'text', role, text: data.text, media: data.media, _id: nextId.current++ },
         ])
+        if (userScrolledUp.current) {
+          setNewMsgCount((c) => c + 1)
+        }
       }
     },
-    onStatus: onSSEStatus,
+    onStatus: activeChannel === 'default' ? onSSEStatus : undefined,
   })
 
   // Send message
   const handleSend = useCallback(async (text: string) => {
+    // Clear streaming state from previous round
+    setStreamText('')
+    setStreamTools([])
+    streamTextRef.current = ''
+
     setMessages((prev) => [...prev, { kind: 'text', role: 'user', text, _id: nextId.current++ }])
     setIsWaiting(true)
 
     try {
-      const data = await api.chat.send(text)
+      const channel = activeChannelRef.current === 'default' ? undefined : activeChannelRef.current
+      const data = await api.chat.send(text, channel)
+
+      // POST returned — persist streaming tool calls, then add final text
+      const tools = streamToolsRef.current
+      setStreamText('')
+      setStreamTools([])
+      streamTextRef.current = ''
 
       if (data.text) {
         const media = data.media?.length ? data.media : undefined
-        setMessages((prev) => [...prev, { kind: 'text', role: 'assistant', text: data.text, media, _id: nextId.current++ }])
+        setMessages((prev) => {
+          const next = [...prev]
+          // Persist tool calls collected during streaming
+          if (tools.length > 0) {
+            next.push({
+              kind: 'tool_calls',
+              calls: tools.map((t) => ({
+                name: t.name,
+                input: typeof t.input === 'string' ? t.input : JSON.stringify(t.input ?? ''),
+                result: t.result,
+              })),
+              _id: nextId.current++,
+            })
+          }
+          next.push({ kind: 'text', role: 'assistant', text: data.text, media, _id: nextId.current++ })
+          return next
+        })
+        if (userScrolledUp.current) {
+          setNewMsgCount((c) => c + 1)
+        }
       }
     } catch (err) {
+      setStreamText('')
+      setStreamTools([])
+      streamTextRef.current = ''
+
       const msg = err instanceof Error ? err.message : 'Unknown error'
       setMessages((prev) => [
         ...prev,
@@ -100,13 +205,184 @@ export function ChatPage({ onSSEStatus }: ChatPageProps) {
   const handleScrollToBottom = useCallback(() => {
     userScrolledUp.current = false
     setShowScrollBtn(false)
+    setNewMsgCount(0)
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [])
 
+  const switchToChannel = useCallback((id: string) => {
+    setActiveChannel(id)
+    setPopoverOpen(false)
+    setShowNewForm(false)
+    setNewChannelError('')
+  }, [])
+
+  const handleCreateChannel = useCallback(async () => {
+    setNewChannelError('')
+    if (!newChannelId.trim() || !newChannelLabel.trim()) {
+      setNewChannelError('ID and label are required')
+      return
+    }
+    try {
+      const { channel } = await api.channels.create({ id: newChannelId.trim(), label: newChannelLabel.trim() })
+      setChannels((prev) => [...prev, channel])
+      switchToChannel(channel.id)
+      setNewChannelId('')
+      setNewChannelLabel('')
+    } catch (err) {
+      setNewChannelError(err instanceof Error ? err.message : 'Failed to create channel')
+    }
+  }, [newChannelId, newChannelLabel, switchToChannel])
+
+  const handleDeleteChannel = useCallback(async (id: string, e: React.MouseEvent) => {
+    e.stopPropagation()
+    try {
+      await api.channels.remove(id)
+      setChannels((prev) => prev.filter((ch) => ch.id !== id))
+      if (activeChannel === id) switchToChannel('default')
+    } catch (err) {
+      console.error('Failed to delete channel:', err)
+    }
+  }, [activeChannel, switchToChannel])
+
   return (
     <div className="flex flex-col flex-1 min-h-0 max-w-[800px] mx-auto w-full">
-      {/* Messages */}
-      <div ref={containerRef} className="flex-1 overflow-y-auto px-5 py-6 relative">
+      {/* Sub-channel context bar */}
+      {isOnSubChannel && (
+        <div className="flex items-center gap-3 px-4 py-2 border-b border-border bg-bg-secondary/30">
+          <button
+            onClick={() => switchToChannel('default')}
+            className="flex items-center gap-1 text-sm text-text-muted hover:text-text transition-colors"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M19 12H5M12 19l-7-7 7-7" />
+            </svg>
+            Alice
+          </button>
+          <span className="text-sm text-text-muted/50">|</span>
+          <span className="text-sm font-medium text-text">
+            <span className="text-text-muted mr-0.5">#</span>
+            {activeChannelConfig?.label ?? activeChannel}
+          </span>
+          {activeChannelConfig && activeChannelConfig.id !== 'default' && (
+            <button
+              onClick={() => setEditingChannel(activeChannelConfig)}
+              className="ml-auto w-6 h-6 rounded flex items-center justify-center text-text-muted/50 hover:text-text-muted hover:bg-bg-secondary transition-colors"
+              title="Channel settings"
+            >
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
+                <circle cx="12" cy="12" r="3" />
+              </svg>
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* Messages area wrapper — relative so the # button stays fixed */}
+      <div className="flex-1 min-h-0 relative">
+        {/* # icon button — fixed in top-right corner, always visible on main channel */}
+        {!isOnSubChannel && (
+          <div className="absolute top-3 right-5 z-20" ref={popoverRef}>
+            <button
+              onClick={() => setPopoverOpen((v) => !v)}
+              className="w-7 h-7 rounded-md flex items-center justify-center text-text-muted/40 hover:text-text-muted hover:bg-bg-secondary/80 transition-all"
+              aria-label="Channels"
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M4 9h16M4 15h16M10 3l-2 18M16 3l-2 18" />
+              </svg>
+            </button>
+
+            {/* Popover dropdown */}
+            {popoverOpen && (
+              <div className="absolute top-9 right-0 w-56 max-w-[calc(100vw-2rem)] rounded-lg border border-border bg-bg shadow-xl py-1 animate-in fade-in slide-in-from-top-1 duration-150">
+                {subChannels.map((ch) => (
+                  <button
+                    key={ch.id}
+                    onClick={() => switchToChannel(ch.id)}
+                    className="w-full flex items-center justify-between px-3 py-2 text-sm text-text hover:bg-bg-secondary/60 transition-colors group"
+                  >
+                    <span>
+                      <span className="text-text-muted mr-1">#</span>
+                      {ch.label}
+                    </span>
+                    <span className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-all">
+                      <span
+                        onClick={(e) => { e.stopPropagation(); setEditingChannel(ch); setPopoverOpen(false) }}
+                        className="w-5 h-5 rounded flex items-center justify-center text-text-muted hover:text-text hover:bg-bg-secondary cursor-pointer"
+                        title="Settings"
+                      >
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                          <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
+                          <circle cx="12" cy="12" r="3" />
+                        </svg>
+                      </span>
+                      <span
+                        onClick={(e) => handleDeleteChannel(ch.id, e)}
+                        className="w-5 h-5 rounded flex items-center justify-center text-text-muted hover:text-red-400 hover:bg-red-400/10 cursor-pointer"
+                        title="Delete"
+                      >
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                          <path d="M18 6L6 18M6 6l12 12" />
+                        </svg>
+                      </span>
+                    </span>
+                  </button>
+                ))}
+
+                <div className="border-t border-border my-1" />
+
+                {!showNewForm ? (
+                  <button
+                    onClick={() => setShowNewForm(true)}
+                    className="w-full flex items-center gap-2 px-3 py-2 text-sm text-text-muted hover:text-text hover:bg-bg-secondary/60 transition-colors"
+                  >
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                      <path d="M12 5v14M5 12h14" />
+                    </svg>
+                    New channel
+                  </button>
+                ) : (
+                  <div className="px-3 py-2 space-y-2">
+                    <input
+                      type="text"
+                      placeholder="id (e.g. research)"
+                      value={newChannelId}
+                      onChange={(e) => setNewChannelId(e.target.value.toLowerCase().replace(/[^a-z0-9-_]/g, ''))}
+                      className="w-full text-xs px-2 py-1.5 rounded border border-border bg-bg-secondary text-text placeholder:text-text-muted focus:outline-none focus:border-accent"
+                      autoFocus
+                    />
+                    <input
+                      type="text"
+                      placeholder="label"
+                      value={newChannelLabel}
+                      onChange={(e) => setNewChannelLabel(e.target.value)}
+                      className="w-full text-xs px-2 py-1.5 rounded border border-border bg-bg-secondary text-text placeholder:text-text-muted focus:outline-none focus:border-accent"
+                    />
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={handleCreateChannel}
+                        className="text-xs px-2.5 py-1 rounded bg-accent text-white hover:bg-accent/80 transition-colors"
+                      >
+                        Create
+                      </button>
+                      <button
+                        onClick={() => { setShowNewForm(false); setNewChannelError(''); setNewChannelId(''); setNewChannelLabel('') }}
+                        className="text-xs px-2 py-1 rounded text-text-muted hover:text-text"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                    {newChannelError && <p className="text-xs text-red-400">{newChannelError}</p>}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Scrollable messages */}
+        <div ref={containerRef} className="h-full overflow-y-auto px-5 py-6">
         {messages.length === 0 && !isWaiting && (
           <div className="flex-1 flex flex-col items-center justify-center h-full gap-4 select-none">
             <div className="w-14 h-14 rounded-2xl bg-bg-secondary border border-border flex items-center justify-center text-accent">
@@ -115,8 +391,17 @@ export function ChatPage({ onSSEStatus }: ChatPageProps) {
               </svg>
             </div>
             <div className="text-center">
-              <h2 className="text-lg font-semibold text-text mb-1">Hi, I'm Alice</h2>
-              <p className="text-sm text-text-muted">Send a message to start chatting</p>
+              {activeChannel === 'default' ? (
+                <>
+                  <h2 className="text-lg font-semibold text-text mb-1">Hi, I'm Alice</h2>
+                  <p className="text-sm text-text-muted">Send a message to start chatting</p>
+                </>
+              ) : (
+                <>
+                  <h2 className="text-lg font-semibold text-text mb-1">{activeChannelConfig?.label ?? activeChannel}</h2>
+                  <p className="text-sm text-text-muted">Send a message to start chatting</p>
+                </>
+              )}
             </div>
           </div>
         )}
@@ -125,7 +410,6 @@ export function ChatPage({ onSSEStatus }: ChatPageProps) {
             const prev = i > 0 ? messages[i - 1] : undefined
 
             if (msg.kind === 'tool_calls') {
-              // Tool calls get compact spacing, grouped under the preceding assistant block
               const prevIsAssistantish = prev != null && (
                 prev.kind === 'tool_calls' ||
                 (prev.kind === 'text' && prev.role === 'assistant')
@@ -156,11 +440,40 @@ export function ChatPage({ onSSEStatus }: ChatPageProps) {
           })}
           {isWaiting && (
             <div className={`${messages.length > 0 ? 'mt-5' : ''}`}>
-              <ThinkingIndicator />
+              {streamTools.length > 0 || streamText ? (
+                <>
+                  <div className="flex items-center gap-2 mb-1.5">
+                    <div className="w-6 h-6 rounded-full bg-accent/15 flex items-center justify-center text-accent shrink-0">
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M12 2L15.09 8.26L22 9.27L17 14.14L18.18 21.02L12 17.77L5.82 21.02L7 14.14L2 9.27L8.91 8.26L12 2Z" />
+                      </svg>
+                    </div>
+                    <span className="text-[12px] text-text-muted font-medium">Alice</span>
+                  </div>
+                  {streamTools.length > 0 && <StreamingToolGroup tools={streamTools} />}
+                  {streamText ? (
+                    <div className="mt-1">
+                      <ChatMessage role="assistant" text={streamText} isGrouped />
+                    </div>
+                  ) : streamTools.length > 0 && streamTools.every((t) => t.status === 'done') ? (
+                    /* All tools finished but text hasn't arrived yet — show thinking dots */
+                    <div className="text-text-muted ml-8 mt-1">
+                      <div className="flex">
+                        <span className="thinking-dot">.</span>
+                        <span className="thinking-dot">.</span>
+                        <span className="thinking-dot">.</span>
+                      </div>
+                    </div>
+                  ) : null}
+                </>
+              ) : (
+                <ThinkingIndicator />
+              )}
             </div>
           )}
         </div>
         <div ref={messagesEndRef} />
+        </div>
       </div>
 
       {/* Scroll to bottom button */}
@@ -168,18 +481,35 @@ export function ChatPage({ onSSEStatus }: ChatPageProps) {
         <div className="relative">
           <button
             onClick={handleScrollToBottom}
-            className="absolute -top-12 left-1/2 -translate-x-1/2 w-8 h-8 rounded-full bg-bg-secondary border border-border text-text-muted hover:text-text hover:border-accent/50 flex items-center justify-center transition-all shadow-lg z-10"
+            className="absolute -top-14 left-1/2 -translate-x-1/2 w-10 h-10 rounded-full bg-bg-secondary border border-border text-text-muted hover:text-text hover:border-accent/50 flex items-center justify-center transition-all shadow-lg z-10"
             aria-label="Scroll to bottom"
           >
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
               <path d="M12 5v14M5 12l7 7 7-7" />
             </svg>
+            {newMsgCount > 0 && (
+              <span className="absolute -top-1.5 -right-1.5 min-w-[18px] h-[18px] rounded-full bg-accent text-white text-[10px] font-semibold flex items-center justify-center px-1">
+                {newMsgCount > 99 ? '99+' : newMsgCount}
+              </span>
+            )}
           </button>
         </div>
       )}
 
       {/* Input */}
       <ChatInput disabled={isWaiting} onSend={handleSend} />
+
+      {/* Channel config modal */}
+      {editingChannel && (
+        <ChannelConfigModal
+          channel={editingChannel}
+          onClose={() => setEditingChannel(null)}
+          onSaved={(updated) => {
+            setChannels((prev) => prev.map((ch) => ch.id === updated.id ? updated : ch))
+            setEditingChannel(null)
+          }}
+        />
+      )}
     </div>
   )
 }

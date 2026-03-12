@@ -1,9 +1,9 @@
 /**
  * Cron Listener — subscribes to `cron.fire` events from the EventLog
- * and routes them through the AI Engine for processing.
+ * and routes them through the AgentCenter for processing.
  *
  * Flow:
- *   eventLog 'cron.fire' → engine.askWithSession(payload, session)
+ *   eventLog 'cron.fire' → agentCenter.askWithSession(payload, session)
  *                         → connectorCenter.notify(reply)
  *                         → eventLog 'cron.done' / 'cron.error'
  *
@@ -12,7 +12,7 @@
  */
 
 import type { EventLog, EventLogEntry } from '../../core/event-log.js'
-import type { Engine } from '../../core/engine.js'
+import type { AgentCenter } from '../../core/agent-center.js'
 import { SessionStore } from '../../core/session.js'
 import type { ConnectorCenter } from '../../core/connector-center.js'
 import type { CronFirePayload } from './engine.js'
@@ -23,7 +23,7 @@ import { HEARTBEAT_JOB_NAME } from '../heartbeat/heartbeat.js'
 export interface CronListenerOpts {
   connectorCenter: ConnectorCenter
   eventLog: EventLog
-  engine: Engine
+  agentCenter: AgentCenter
   /** Optional: inject a session for testing. Otherwise creates a dedicated cron session. */
   session?: SessionStore
 }
@@ -36,7 +36,7 @@ export interface CronListener {
 // ==================== Factory ====================
 
 export function createCronListener(opts: CronListenerOpts): CronListener {
-  const { connectorCenter, eventLog, engine } = opts
+  const { connectorCenter, eventLog, agentCenter } = opts
   const session = opts.session ?? new SessionStore('cron/default')
 
   let unsubscribe: (() => void) | null = null
@@ -59,7 +59,7 @@ export function createCronListener(opts: CronListenerOpts): CronListener {
 
     try {
       // Ask the AI engine with the cron payload
-      const result = await engine.askWithSession(payload.payload, session, {
+      const result = await agentCenter.askWithSession(payload.payload, session, {
         historyPreamble: 'The following is the recent cron session conversation. This is an automated cron job execution.',
       })
 

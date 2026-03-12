@@ -8,9 +8,7 @@
 
 import { tool } from 'ai'
 import { z } from 'zod'
-import type { OpenBBEquityClient } from '@/openbb/equity/client'
-import type { OpenBBCryptoClient } from '@/openbb/crypto/client'
-import type { OpenBBCurrencyClient } from '@/openbb/currency/client'
+import type { EquityClientLike, CryptoClientLike, CurrencyClientLike } from '@/openbb/sdk/types'
 import { IndicatorCalculator } from './indicator/calculator'
 import type { IndicatorContext, OhlcvData } from './indicator/types'
 
@@ -40,9 +38,9 @@ function buildStartDate(interval: string): string {
 
 function buildContext(
   asset: 'equity' | 'crypto' | 'currency',
-  equityClient: OpenBBEquityClient,
-  cryptoClient: OpenBBCryptoClient,
-  currencyClient: OpenBBCurrencyClient,
+  equityClient: EquityClientLike,
+  cryptoClient: CryptoClientLike,
+  currencyClient: CurrencyClientLike,
 ): IndicatorContext {
   return {
     getHistoricalData: async (symbol, interval) => {
@@ -68,9 +66,9 @@ function buildContext(
 }
 
 export function createAnalysisTools(
-  equityClient: OpenBBEquityClient,
-  cryptoClient: OpenBBCryptoClient,
-  currencyClient: OpenBBCurrencyClient,
+  equityClient: EquityClientLike,
+  cryptoClient: CryptoClientLike,
+  currencyClient: CurrencyClientLike,
 ) {
   return {
     calculateIndicator: tool({

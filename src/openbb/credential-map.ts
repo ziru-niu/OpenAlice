@@ -35,3 +35,21 @@ export function buildCredentialsHeader(
 
   return Object.keys(mapped).length > 0 ? JSON.stringify(mapped) : undefined
 }
+
+/**
+ * Build credentials object for OpenTypeBB SDK executor.
+ * Same mapping as buildCredentialsHeader, but returns a plain object
+ * instead of a JSON string (executor.execute() accepts Record<string, string>).
+ */
+export function buildSDKCredentials(
+  providerKeys: Record<string, string | undefined> | undefined,
+): Record<string, string> {
+  if (!providerKeys) return {}
+
+  const mapped: Record<string, string> = {}
+  for (const [k, v] of Object.entries(providerKeys)) {
+    if (v && keyMapping[k]) mapped[keyMapping[k]] = v
+  }
+
+  return mapped
+}
