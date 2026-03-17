@@ -207,7 +207,6 @@ export class AlpacaBroker implements IBroker {
       if (changes.tif) patch.time_in_force = ibkrTifToAlpaca(changes.tif)
 
       const result = await this.client.replaceOrder(orderId, patch) as AlpacaOrderRaw
-      const isFilled = result.status === 'filled'
 
       return {
         success: true,
@@ -271,8 +270,11 @@ export class AlpacaBroker implements IBroker {
       this.getRealizedPnL(),
     ])
 
-    // Alpaca account API doesn't provide unrealizedPnL — aggregate from positions
-    const unrealizedPnL = positions.reduce((sum, p) => sum + parseFloat(p.unrealized_pl), 0)
+    // Alpaca account API doesn't provide unrealizedPnL — aggregate from positions with Decimal
+    const unrealizedPnL = positions.reduce(
+      (sum, p) => sum.plus(new Decimal(p.unrealized_pl)),
+      new Decimal(0),
+    ).toNumber()
 
     return {
       netLiquidation: parseFloat(account.equity),
@@ -311,7 +313,7 @@ export class AlpacaBroker implements IBroker {
 
   async getOrder(orderId: string): Promise<OpenOrder | null> {
     try {
-      const raw = await this.client.getOrder({ order_id: orderId }) as AlpacaOrderRaw
+      const raw = await this.client.getOrder(orderId) as AlpacaOrderRaw
       return this.mapOpenOrder(raw)
     } catch {
       return null
@@ -418,7 +420,9 @@ export class AlpacaBroker implements IBroker {
     if (o.stop_price) order.auxPrice = parseFloat(o.stop_price)
     if (o.time_in_force) order.tif = o.time_in_force.toUpperCase()
     if (o.extended_hours) order.outsideRth = true
-    order.orderId = parseInt(o.id, 10) || 0
+    // Alpaca order IDs are UUIDs — IBKR's orderId field is number, so leave at default 0.
+    // The real string ID is preserved through PlaceOrderResult.orderId and getOrder(string).
+    order.orderId = 0
 
     return {
       contract,
