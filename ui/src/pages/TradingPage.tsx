@@ -86,6 +86,7 @@ export function TradingPage() {
           onSave={async (platform, account) => {
             await tc.savePlatform(platform)
             await tc.saveAccount(account)
+            if (account.apiKey) tc.reconnectAccount(account.id).catch(() => {})
             setDialog(null)
           }}
           onClose={() => setDialog(null)}
@@ -393,10 +394,10 @@ function CreateWizard({ existingAccountIds, onSave, onClose }: {
           <div className="space-y-3">
             <p className="text-[13px] text-text-muted mb-4">API Credentials</p>
             <Field label="API Key">
-              <input className={inputClass} type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder="Optional — can be added later" />
+              <input className={inputClass} type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder="Required" />
             </Field>
             <Field label={type === 'alpaca' ? 'Secret Key' : 'API Secret'}>
-              <input className={inputClass} type="password" value={apiSecret} onChange={(e) => setApiSecret(e.target.value)} placeholder="Optional — can be added later" />
+              <input className={inputClass} type="password" value={apiSecret} onChange={(e) => setApiSecret(e.target.value)} placeholder="Required" />
             </Field>
             {type === 'ccxt' && (
               <Field label="Password">
@@ -426,7 +427,7 @@ function CreateWizard({ existingAccountIds, onSave, onClose }: {
           </button>
         )}
         {step === 3 && (
-          <button onClick={handleCreate} disabled={saving} className="btn-primary-sm">
+          <button onClick={handleCreate} disabled={saving || !apiKey.trim() || !apiSecret.trim()} className="btn-primary-sm">
             {saving ? 'Creating...' : 'Create'}
           </button>
         )}
